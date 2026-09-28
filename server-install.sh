@@ -21,10 +21,12 @@ set -euo pipefail
 # General
 TIMEZONE="Etc/UTC"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARCH="$(dpkg --print-architecture)"
 
-# Samba/Tailscale
+# Web Addresses
 YOURDOMAIN="yourdomain.com"
-SUBDOMAIN="yoursubdmain"   #like yoursubdomain.yourdomain.com
+SUBDOMAIN="yoursubdomain"   #like yoursubdomain.yourdomain.com(Only used if apache will not be serving www)
+SITENAME="yoursitename"    #This determines apache's .conf and ensite. can be practically anything you want, EXCEPT 000-default
 YOUREMAIL="youremail@domain.com"
 
 # Library Paths
@@ -35,10 +37,12 @@ CALIBRE_LIBRARY="/path/to/books/library"
 MUSIC_LIBRARY="/path/to/music/library"
 
 # Ports
-SEARXNG_PORT=80
+APACHE_PORT=80
+APACHE_SEC_PORT=443
 CALIBRE_PORT=8083
 CROSSPOINT_PORT=8085
-NAVDROME_PORT=4533
+NAVIDROME_PORT=4533
+SSH_PORT=22
 
 # Users
 CALIBRE_USER="acw"
@@ -47,6 +51,7 @@ CROSSPOINT_USER="cps"
 CROSSPOINT_GROUP="cps"
 
 # Installation flags
+INSTALL_MODE=false
 VERBOSE=false
 INSTALL_SHARING=false
 INSTALL_WEB=false
@@ -56,6 +61,8 @@ INSTALL_CROSSPOINT=false
 INSTALL_NAVIDROME=false
 
 # Uninstall flags
+UNINSTALL_MODE=false
+REINSTALL_MODE=false
 UNINSTALL_ALL=false
 UNINSTALL_SHARING=false
 UNINSTALL_WEB=false
@@ -63,6 +70,12 @@ UNINSTALL_SEARXNG=false
 UNINSTALL_CALIBRE=false
 UNINSTALL_CROSSPOINT=false
 UNINSTALL_NAVIDROME=false
+
+# Track installed services for health check
+SERVICES_CHECKED=()
+FAILED_SERVICES=()
+
+OPERATION_MODE=""
 
 #-------------------------------------------------------------------------------
 # COLOURS FOR OUTPUT
@@ -92,6 +105,27 @@ check_root() {
     fi
 }
 
+if [[ "$CALIBRE_LIBRARY" == "/path/to/books/library" ]]; then
+    log_error "Please configure CALIBRE_LIBRARY before installation."
+    return 1
+fi
+
+if [[ "$MUSIC_LIBRARY" == "/path/to/music/library" ]]; then
+    log_error "Please configure MUSIC_LIBRARY before installation."
+    return 1
+fi
+
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    CURRENT_USER="${SUDO_USER}"
+else
+    CURRENT_USER=""
+fi
+
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "This script requires Bash 4 or newer." >&2
+    exit 1
+fi
+
 confirm() {
     local prompt="$1"
     local default="${2:-n}"
@@ -100,6 +134,33 @@ confirm() {
         [Yy]*) return 0 ;;
         *)     return 1 ;;
     esac
+}
+
+validate_config() {
+    [[ -n "$CALIBRE_LIBRARY" ]] || {
+        log_error "CALIBRE_LIBRARY is empty."
+        return 1
+    }
+    [[ -n "$MUSIC_LIBRARY" ]] || {
+        log_error "MUSIC_LIBRARY is empty."
+        return 1
+    }
+    [[ "$APACHE_PORT" =~ ^[0-9]+$ ]] || {
+        log_error "APACHE_PORT must be numeric."
+        return 1
+    }
+    [[ "$CALIBRE_PORT" =~ ^[0-9]+$ ]] || {
+        log_error "CALIBRE_PORT must be numeric."
+        return 1
+    }
+    [[ "$CROSSPOINT_PORT" =~ ^[0-9]+$ ]] || {
+        log_error "CROSSPOINT_PORT must be numeric."
+        return 1
+    }
+    [[ "$NAVIDROME_PORT" =~ ^[0-9]+$ ]] || {
+        log_error "NAVIDROME_PORT must be numeric."
+        return 1
+    }
 }
 
 section_header() {
@@ -111,13 +172,12 @@ section_header() {
 }
 
 cmd_exec() {
-    """Execute a command, showing it in verbose mode."""
     if [[ "${VERBOSE}" == true ]]; then
-        echo -e "${CYAN}➜ ${NC}$*"
-        "$@"
-    else
-        "$@"
+        printf '%b➜%b ' "$CYAN" "$NC"
+        printf '%q ' "$@"
+        printf '\n'
     fi
+    "$@"
 }
 
 usage() {
@@ -130,7 +190,7 @@ OPTIONS:
   Installation Modes:
     (no args)                    Run complete installation of all services
     --install-all                Same as no args - install everything
-    --reinstall                  Force reinstall of all services
+    --reinstall                  Reinstall/repair all managed services without deleting libraries
 
   Selective Installation:
     --install-sharing            Install file sharing (Samba, Tailscale, Nemo)
@@ -141,7 +201,7 @@ OPTIONS:
     --install-navidrome          Install Navidrome music server only
 
   Uninstallation Modes:
-    --uninstall-all              Remove ALL services and clean system
+    --uninstall-all              Remove all managed services and packages
     --uninstall-sharing          Remove Samba, Tailscale, Nemo
     --uninstall-web              Remove Apache + PHP
     --uninstall-searxng          Remove SearxNG
@@ -173,63 +233,142 @@ NOTES:
 EOF
 }
 
+status_http_service() {
+    local display_name="$1"
+    local unit="$2"
+    local url="$3"
+    local port="$4"
+    local http_status
+
+    if ! systemctl cat "$unit" >/dev/null 2>&1; then
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "$display_name" "not-installed" "N/A" "$port" "$(date '+%H:%M:%S')"
+        return
+    fi
+
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        http_status=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+            "$url" 2>/dev/null || printf '000')
+
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "$display_name" "running" "HTTP ${http_status}" "$port" "$(date '+%H:%M:%S')"
+    else
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "$display_name" "stopped" "N/A" "$port" "$(date '+%H:%M:%S')"
+    fi
+}
+
 show_status() {
     section_header "Service Status Report"
-    
+
     echo ""
-    printf "%-20s %-15s %-10s %-8s %s\n" "SERVICE" "UNIT ACTIVE?" "HTTP STATUS" "PORT" "LAST CHECK"
-    printf "%-20s %-15s %-10s %-8s %s\n" "-------" "------------" "-----------" "----" "----------"
+    printf "%-20s %-15s %-10s %-8s %s\n" \
+        "SERVICE" "UNIT ACTIVE?" "HTTP STATUS" "PORT" "LAST CHECK"
+    printf "%-20s %-15s %-10s %-8s %s\n" \
+        "-------" "------------" "-----------" "----" "----------"
+
+    status_http_service \
+        "apache2" \
+        "apache2" \
+        "http://localhost:${APACHE_PORT}/" \
+        "${APACHE_PORT}"
+
+    status_http_service \
+        "calibre-web" \
+        "calibre-web-nextgen" \
+        "http://localhost:${CALIBRE_PORT}/" \
+        "${CALIBRE_PORT}"
+
+    status_http_service \
+        "crosspoint-sync" \
+        "crosspoint-sync" \
+        "http://localhost:${CROSSPOINT_PORT}/" \
+        "${CROSSPOINT_PORT}"
+
+    status_http_service \
+        "navidrome" \
+        "navidrome" \
+        "http://localhost:${NAVIDROME_PORT}/" \
+        "${NAVIDROME_PORT}"
     
-    # Apache
-    if systemctl is-active --quiet apache2 2>/dev/null; then
-        printf "%-20s %-15s " "apache2" "running" "checking" "80" "$(date '+%H:%M:%S')"
-        if curl -s -o /dev/null -w "%{http_code}" http://localhost/ 2>/dev/null | grep -q "^2"; then
-            printf "HTTP %s\n" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/)"
+    # Samba
+    if command -v smbd >/dev/null 2>&1; then
+        if systemctl is-active --quiet smbd 2>/dev/null; then
+            if testparm -s >/dev/null 2>&1; then
+                printf "%-20s %-15s %-10s %-8s %s\n" \
+                    "samba" "running" "config-ok" "445" "$(date '+%H:%M:%S')"
+            else
+                printf "%-20s %-15s %-10s %-8s %s\n" \
+                    "samba" "running" "config-error" "445" "$(date '+%H:%M:%S')"
+            fi
         else
-            printf "N/A\n"
+            printf "%-20s %-15s %-10s %-8s %s\n" \
+                "samba" "stopped" "N/A" "445" "$(date '+%H:%M:%S')"
         fi
     else
-        printf "%-20s %-15s %-10s %-8s %s\n" "apache2" "stopped" "N/A" "80" "$(date '+%H:%M:%S')"
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "samba" "not-installed" "N/A" "445" "$(date '+%H:%M:%S')"
     fi
     
-    # Calibre-Web
-    if systemctl is-active --quiet calibre-web-nextgen 2>/dev/null; then
-        printf "%-20s %-15s " "calibre-web" "running" "checking" "$CALIBRE_PORT" "$(date '+%H:%M:%S')"
-        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${CALIBRE_PORT}/" 2>/dev/null | grep -q "^2\|^3"; then
-            printf "HTTP %s\n" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${CALIBRE_PORT}/")"
-        else
-            printf "N/A\n"
-        fi
+    # Tailscale
+    if command -v tailscale >/dev/null 2>&1; then
+        TAIL_STATUS=$(tailscale status 2>/dev/null | head -1 | cut -c1-30 || printf 'unknown')
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "tailscale" "installed" "$TAIL_STATUS" "-" "$(date '+%H:%M:%S')"
     else
-        printf "%-20s %-15s %-10s %-8s %s\n" "calibre-web" "stopped" "N/A" "$CALIBRE_PORT" "$(date '+%H:%M:%S')"
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "tailscale" "not-installed" "N/A" "-" "$(date '+%H:%M:%S')"
     fi
     
-    # CrossPoint Sync
-    if systemctl is-active --quiet crosspoint-sync 2>/dev/null; then
-        printf "%-20s %-15s " "crosspoint-sync" "running" "checking" "$CROSSPOINT_PORT" "$(date '+%H:%M:%S')"
-        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${CROSSPOINT_PORT}/" 2>/dev/null | grep -q "^2\|^3"; then
-            printf "HTTP %s\n" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${CROSSPOINT_PORT}/")"
-        else
-            printf "N/A\n"
-        fi
+    # SearxNG (runs under uWSGI)
+    SEARXNG_HTTP_STATUS=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+        "http://localhost:${APACHE_PORT}/searxng/" \
+        2>/dev/null || printf '000')
+    if service uwsgi status searxng 2>/dev/null | grep -q "active"; then
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "searxng" "running" "HTTP ${SEARXNG_HTTP_STATUS}" \
+            "${APACHE_PORT}" "$(date '+%H:%M:%S')"
     else
-        printf "%-20s %-15s %-10s %-8s %s\n" "crosspoint-sync" "stopped" "N/A" "$CROSSPOINT_PORT" "$(date '+%H:%M:%S')"
+        printf "%-20s %-15s %-10s %-8s %s\n" \
+            "searxng" "stopped" "N/A" \
+            "${APACHE_PORT}" "$(date '+%H:%M:%S')"
     fi
-    
-    # Navidrome
-    if systemctl is-active --quiet navidrome 2>/dev/null; then
-        printf "%-20s %-15s " "navidrome" "running" "checking" "$NAVDROME_PORT" "$(date '+%H:%M:%S')"
-        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${NAVDROME_PORT}/" 2>/dev/null | grep -q "^2\|^3"; then
-            printf "HTTP %s\n" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${NAVDROME_PORT}/")"
-        else
-            printf "N/A\n"
-        fi
-    else
-        printf "%-20s %-15s %-10s %-8s %s\n" "navidrome" "stopped" "N/A" "$NAVDROME_PORT" "$(date '+%H:%M:%S')"
-    fi
-    
+
     echo ""
-    log_info "Run 'systemctl status <service>' for detailed service info"
+    log_info "Run 'systemctl status <service>' for detailed service information."
+}
+
+add_service_check() {
+    local SERVICE_NAME="$1"
+    SERVICES_CHECKED+=("$SERVICE_NAME")
+}
+
+verify_service_status() {
+
+    local SERVICE_NAME="$1"
+    local DISPLAY_NAME="$2"
+    
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        add_service_check "${SERVICE_NAME}"
+        return 0
+    else
+        FAILED_SERVICES+=("${SERVICE_NAME}|${DISPLAY_NAME}")
+        return 1
+    fi
+}
+
+verify_searxng_status() {
+    log_info "Checking SearxNG service status..."
+    
+    # SearxNG runs under uWSGI, not direct systemd
+    if service uwsgi status searxng 2>/dev/null | grep -q "active"; then
+        log_success "✓ SearxNG is running (via uWSGI)"
+        add_service_check "searxng"
+        return 0
+    else
+        FAILED_SERVICES+=("searxng|SearxNG")
+        return 1
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -257,10 +396,15 @@ step_system_prep() {
         libssl-dev \
         unzip \
         wget \
-        ufw
+        openssl \
+        ufw \
+        acl
+
+    log_info "Allowing SSH before enabling UFW..."
+    cmd_exec ufw allow "${SSH_PORT}/tcp"
 
     log_info "Enabling ufw..."
-    cmd_exec ufw enable
+    cmd_exec ufw --force enable
     
     log_info "Creating Python symlink..."
     if [[ "${VERBOSE}" == true ]]; then
@@ -282,8 +426,12 @@ step_file_sharing() {
     log_info "Opening firewall port..."
     cmd_exec ufw allow 445/tcp    # Samba
     
-    log_info "Installing Tailscale..."
-    cmd_exec curl -fsSL https://tailscale.com/install.sh | sh
+    if command -v tailscale >/dev/null 2>&1; then
+        log_info "Tailscale already installed."
+    else
+        log_info "Installing Tailscale..."
+        cmd_exec curl -fsSL https://tailscale.com/install.sh | sh
+    fi
     log_info "Tailscale installed. Run 'sudo tailscale up --ssh' to activate."
     
     log_info "Installing Samba..."
@@ -291,12 +439,67 @@ step_file_sharing() {
     
     log_info "Configuring Samba directory..."
     cmd_exec mkdir -p /srv/samba/shared
-    cmd_exec chown nobody:nogroup /srv/samba/shared
-    cmd_exec chmod 2770 /srv/samba/shared
+    if ! getent group users >/dev/null; then
+        cmd_exec groupadd users
+    fi
+    if [[ -n "${CURRENT_USER}" ]]; then
+        cmd_exec chown "${CURRENT_USER}":users /srv/samba/shared
+        cmd_exec chmod 2770 /srv/samba/shared
+    else
+        cmd_exec chown root:users /srv/samba/shared
+        cmd_exec chmod 2770 /srv/samba/shared
+    fi
+
+    log_info "Checking for existing [shared] section in smb.conf..."
+    
+    # Check if [shared] already exists
+    if grep -qiE '^[[:space:]]*\[shared\][[:space:]]*$' /etc/samba/smb.conf 2>/dev/null; then
+        log_warn "[shared] already exists in smb.conf"
+    else
+        # Backup existing config if it exists
+        if [ -f /etc/samba/smb.conf ]; then
+            log_info "Backing up existing smb.conf..."
+            cmd_exec cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.$(date +%Y%m%d%H%M%S)
+        fi
+        
+        log_info "Adding [shared] section to smb.conf..."
+    
+    cat >> /etc/samba/smb.conf << SMBCONF
+[shared]
+    path = /srv/samba/shared
+    browseable = yes
+    read only = no
+    guest ok = no
+    valid users = @users
+    force group = users
+    create mask = 0660
+    directory mask = 2770
+SMBCONF
+    fi
+
+    if [[ -n "${CURRENT_USER}" ]]; then
+        cmd_exec usermod -aG users "${CURRENT_USER}"
+    else
+        log_warn "No non-root invoking user detected; skipping users group assignment."
+    fi
+    
+    log_info "Testing Samba configuration..."
+    cmd_exec testparm -s
+    
+    log_info "Restarting Samba service..."
+    cmd_exec systemctl restart smbd
+
+    verify_service_status "smbd" "Samba (smbd)" || true
+        # nmbd is optional - only warn if it's failed (not if just stopped)
+    if ! systemctl is-active --quiet nmbd 2>/dev/null; then
+        log_info "ℹ NetBIOS discovery (nmbd) not running - optional for LAN sharing"
+    else
+        log_info "✓ NetBIOS discovery (nmbd) enabled"
+    fi
     
     log_warn "Post-installation: Add users to Samba with 'sudo smbpasswd -a <username>'"
+    log_info "Access: smb://$(hostname)/shared or \\\\$(hostname)\\shared"
     
-    log_success "File sharing services ready"
 }
 
 step_web_server() {
@@ -306,34 +509,43 @@ step_web_server() {
     cmd_exec apt-get install -y apache2
 
     log_info "Opening firewall ports..."
-    cmd_exec ufw allow 80/tcp     # HTTP
-    cmd_exec ufw allow 443/tcp    # HTTPS
-    
-    log_info "Getting Apache version..."
-    APACHE_VERSION=$(apache2 -v | grep -oP 'version \K[\d.]+')
+    cmd_exec ufw allow "${APACHE_PORT}/tcp"     # HTTP
+    cmd_exec ufw allow "${APACHE_SEC_PORT}/tcp"    # HTTPS
     
     log_info "Installing PHP..."
     cmd_exec apt-get install -y php libapache2-mod-php php-cli php-common
-    
-    # Extract PHP major.minor version (e.g., PHP 8.3.6 → 8.3)
-    PHP_VERSION=$(php -v | head -n1 | grep -oP 'PHP \K\d+\.\d+')
-    log_info "Detected PHP version: ${PHP_VERSION}"
-    
-    log_info "Enabling Apache modules..."
-    
-    cmd_exec a2enmod "php${PHP_VERSION}"
-    cmd_exec a2enmod ssl headers proxy proxy_http proxy_uwsgi rewrite
+
+    PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
+
+    if [[ -f "/etc/apache2/mods-available/php${PHP_VERSION}.load" ]]; then
+        log_info "Enabling Apache PHP module: php${PHP_VERSION}"
+        if ! cmd_exec a2enmod "php${PHP_VERSION}"; then
+            log_warn "Could not enable Apache PHP module php${PHP_VERSION}; continuing."
+            log_warn "PHP CLI remains installed. Apache PHP integration can be fixed manually later."
+        fi
+    else
+        log_warn "Apache PHP module php${PHP_VERSION} was not found."
+        log_warn "PHP CLI is installed, but Apache PHP integration may require manual configuration."
+        log_warn "If PHP pages do not work, inspect:"
+        log_warn "  ls /etc/apache2/mods-available/php*.load"
+        log_warn "  apache2ctl -M | grep php"
+    fi
+
+    cmd_exec a2enmod ssl headers proxy proxy_http rewrite
     
     log_info "Creating document root..."
     cmd_exec mkdir -p /var/www/http
-    # Get current username (non-root user who ran sudo) and use 'users' group
-    CURRENT_USER="${SUDO_USER:-root}"
-    log_info "Setting ownership to ${CURRENT_USER}:users with 775 permissions"
-    cmd_exec chmod -R 775 /var/www/http
+
+    if [[ -n "${CURRENT_USER}" ]]; then
+        cmd_exec chown ${CURRENT_USER}:users /var/www/http
+        cmd_exec chmod -R 775 /var/www/http
+    else
+        log_warn "No non-root invoking user detected; skipping users group assignment."
+    fi
     
     log_info "Configuring VirtualHost..."
-    cmd_exec cat > /etc/apache2/sites-available/000-default.conf << VHOST
-<VirtualHost *:80>
+    cat > /etc/apache2/sites-available/${SITENAME}.conf << VHOST
+<VirtualHost *:${APACHE_PORT}>
     ServerAdmin ${YOUREMAIL}
     ServerName ${YOURDOMAIN}
     ServerAlias ${SUBDOMAIN}.${YOURDOMAIN}
@@ -349,7 +561,8 @@ step_web_server() {
 </VirtualHost>
 VHOST
     
-    cmd_exec a2ensite 000-default.conf
+    cmd_exec a2ensite ${SITENAME}.conf
+    cmd_exec a2dissite 000-default.conf
     
     log_info "Testing Apache configuration..."
     cmd_exec apache2ctl configtest
@@ -359,8 +572,9 @@ VHOST
     
     log_info "Apache2 Status:"
     cmd_exec systemctl status apache2 --no-pager | head -5
+
+    verify_service_status "apache2" "Apache" || true
     
-    log_success "Web server ready at http://${YOURDOMAIN}"
 }
 
 step_searxng() {
@@ -377,12 +591,29 @@ step_searxng() {
     cd searxng
     
     log_info "Modifying platform detection for Linux Mint compatibility..."
-    cmd_exec cp utils/searxng.sh utils/searxng.sh.bak
-    cmd_exec cp utils/lib.sh utils/lib.sh.bak
-    cmd_exec sed -i 's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' utils/searxng.sh
-    cmd_exec sed -i 's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' utils/lib.sh
-    cmd_exec sed -i 's/ubuntu |debian/ubuntu |debian |linuxmint/g' utils/lib.sh
-    
+    [[ -f utils/searxng.sh.bak ]] || cmd_exec cp utils/searxng.sh utils/searxng.sh.bak
+    [[ -f utils/lib.sh.bak ]] || cmd_exec cp utils/lib.sh utils/lib.sh.bak
+    if grep -q 'linuxmint-\*' utils/searxng.sh; then
+        log_info "SearxNG Linux Mint compatibility already applied."
+    else
+        cmd_exec sed -i \
+            's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' \
+            utils/searxng.sh
+    fi
+    if grep -q 'linuxmint-\*' utils/lib.sh; then
+        log_info "SearxNG Linux Mint compatibility already applied." 
+    else
+        cmd_exec sed -i \
+            's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' \
+            utils/lib.sh
+    fi    
+    if grep -q 'linuxmint-\ ' utils/lib.sh; then
+        log_info "SearxNG Linux Mint compatibility already applied."
+    else
+        cmd_exec sed -i \
+            's/ubuntu |debian/ubuntu |debian |linuxmint/g' \
+            utils/lib.sh
+    fi
     log_info "Creating SearxNG system user..."
     cmd_exec useradd --shell /bin/bash --system --home-dir "/usr/local/searxng" \
         --comment 'Privacy-respecting metasearch engine' searxng 2>/dev/null || true
@@ -394,18 +625,20 @@ step_searxng() {
     cmd_exec git config --global --add safe.directory /opt/searxng
     
     log_info "Installing SearxNG components..."
-    cmd_exec sudo -H utils/searxng.sh install all
-    cmd_exec sudo -H utils/searxng.sh install uwsgi
-    cmd_exec sudo -H utils/searxng.sh install apache
+    cmd_exec utils/searxng.sh install all
+    cmd_exec utils/searxng.sh install uwsgi
+    cmd_exec utils/searxng.sh install apache
+
+    cmd_exec a2enmod proxy_uwsgi
     
     log_info "Enabling SearxNG site..."
     cmd_exec a2ensite searxng.conf 2>/dev/null || true
     
     log_info "Restarting Apache and uWSGI..."
     cmd_exec systemctl restart apache2
-    cmd_exec systemctl restart uwsgi 2>/dev/null || true
+    cmd_exec systemctl restart uwsgi
     
-    log_success "SearxNG installed at http://${YOURDOMAIN}${SEARXNG_PORT}/searxng"
+    verify_searxng_status || true
 }
 
 step_calibre() {
@@ -435,7 +668,7 @@ step_calibre() {
         imagemagick
 
     log_info "Opening firewall port..."
-    cmd_exec ufw allow 8083/tcp   # Calibre-Web
+    cmd_exec ufw allow "${CALIBRE_PORT}/tcp"   # Calibre-Web
     
     log_info "Creating installation directory..."
     cmd_exec mkdir -p "$INSTALL_DIR"
@@ -449,24 +682,36 @@ step_calibre() {
     fi
     
     log_info "Creating service user '$CALIBRE_USER'..."
-    id "$CALIBRE_USER" &>/dev/null && log_info "User exists, skipping creation." || \
-        cmd_exec useradd -r -s /bin/false -d "$INSTALL_DIR" "$CALIBRE_USER"
-    CURRENT_USER="${SUDO_USER:-root}"
-    cmd_exec usermod -a -G "$CALIBRE_GROUP" "$CURRENT_USER" 2>/dev/null || true
+    if ! getent group "$CALIBRE_GROUP" >/dev/null; then
+        cmd_exec groupadd --system "$CALIBRE_GROUP"
+    fi
+
+    if ! id "$CALIBRE_USER" &>/dev/null; then
+        cmd_exec useradd \
+            --system \
+            --gid "$CALIBRE_GROUP" \
+            --shell /usr/sbin/nologin \
+            --home-dir "$INSTALL_DIR" \
+            "$CALIBRE_USER"
+    fi
+
+    if [[ -n "${CURRENT_USER}" ]]; then
+        cmd_exec usermod -a -G "$CALIBRE_GROUP" "$CURRENT_USER" 2>/dev/null || true
+    else
+        log_warn "No non-root invoking user detected; skipping users group assignment."
+    fi
     
     log_info "Setting up Python virtual environment..."
     python3 -m venv venv
-    source venv/bin/activate
-    python -m pip install --upgrade pip setuptools wheel
-    ./venv/bin/python3 -m pip install -e .
-    deactivate
+    "$INSTALL_DIR/venv/bin/python3" -m pip install --upgrade pip setuptools wheel
+    "$INSTALL_DIR/venv/bin/python3" -m pip install -e .
     
     log_info "Creating config directory..."
     cmd_exec mkdir -p "$CONFIG_DIR"
     cmd_exec chmod 775 "$CONFIG_DIR"
     
     log_info "Creating systemd service..."
-    cmd_exec cat > /etc/systemd/system/calibre-web-nextgen.service << SERVICE
+    cat > /etc/systemd/system/calibre-web-nextgen.service << SERVICE
 [Unit]
 Description=Calibre-Web NextGen
 After=network.target
@@ -489,19 +734,18 @@ SERVICE
     
     log_info "Setting permissions..."
     cmd_exec chown -R "${CALIBRE_USER}:${CALIBRE_GROUP}" "$INSTALL_DIR"
-    cmd_exec chmod -R 775 "$INSTALL_DIR"
-    cmd_exec setfacl -R -m u:${CALIBRE_USER}:rwx "$CALIBRE_LIBRARY" 2>/dev/null || \
-        log_warn "ACL command failed, manually run: sudo setfacl -R -m u:${CALIBRE_USER}:rwx '${CALIBRE_LIBRARY}'"
+    cmd_exec chmod -R u=rwX,g=rX,o=rX "$INSTALL_DIR"
+    cmd_exec chmod 775 "$CONFIG_DIR"
+    cmd_exec setfacl -R -m u:${CALIBRE_USER}:rwX "$CALIBRE_LIBRARY" 2>/dev/null || \
+    log_warn "ACL command failed, manually run: sudo setfacl -R -m u:${CALIBRE_USER}:rwX '${CALIBRE_LIBRARY}'"
     
     log_info "Initializing Calibre database with README.md..."
-    if [ -f "$SCRIPT_DIR/README.md" ]; then
-        log_info "Adding README.md to Calibre library..."
-        cmd_exec calibredb add "$SCRIPT_DIR/README.md" --with-library "$CALIBRE_LIBRARY"
-        log_success "README.md added to library successfully"
-    else
-        log_warn "README.md not found at $SCRIPT_DIR/README.md - skipping initialization"
-        log_info "You can manually add books later with: calibredb add <ebook> --with-library $CALIBRE_LIBRARY"
-    fi
+
+    cat > "$SCRIPT_DIR/book.txt" << EOF
+This is totally a book I'd read!
+EOF
+
+    cmd_exec calibredb add "$SCRIPT_DIR/book.txt" --with-library "$CALIBRE_LIBRARY"
     
     log_info "Initializing database..."
     cmd_exec systemctl daemon-reload
@@ -522,9 +766,7 @@ SQLEOF
     cmd_exec systemctl enable calibre-web-nextgen
     cmd_exec systemctl start calibre-web-nextgen
     
-    systemctl is-active --quiet calibre-web-nextgen && \
-        log_success "Calibre-Web running at http://localhost:${CALIBRE_PORT}" || \
-        log_warn "Calibre-Web service failed to start. Check logs."
+    verify_service_status "calibre-web-nextgen" "Calibre-Web NextGen" || true
     
     log_info "Default credentials: admin / admin123"
     log_info "Remember to change the password after first login!"
@@ -542,17 +784,12 @@ step_crosspoint() {
     log_info "Node version: $(node --version)"
 
     log_info "Opening firewall port..."
-    cmd_exec ufw allow 8085/tcp   # CrossPoint
+    cmd_exec ufw allow "${CROSSPOINT_PORT}/tcp"   # CrossPoint
     
     log_info "Creating application directory..."
     cmd_exec mkdir -p "$APP_DIR"
     cd "$APP_DIR"
-    
-    log_info "Creating service user..."
-    id "$CROSSPOINT_USER" &>/dev/null && log_info "User exists, skipping creation." || \
-        cmd_exec useradd -r -s /bin/false -d "$APP_DIR" "$CROSSPOINT_USER"
-    cmd_exec chown -R "$CROSSPOINT_USER:$CROSSPOINT_GROUP" "$APP_DIR"
-    
+
     log_info "Cloning repository..."
     if [[ -d .git ]]; then
         log_info "Repository already exists, skipping clone."
@@ -560,32 +797,75 @@ step_crosspoint() {
         cmd_exec git clone https://github.com/crosspoint-reader/crosspoint-sync.git .
     fi
     
+    log_info "Creating service user..."
+    if ! getent group "$CROSSPOINT_GROUP" >/dev/null; then
+        cmd_exec groupadd --system "$CROSSPOINT_GROUP"
+    fi
+
+    if ! id "$CROSSPOINT_USER" &>/dev/null; then
+        cmd_exec useradd \
+            --system \
+            --gid "$CROSSPOINT_GROUP" \
+            --shell /usr/sbin/nologin \
+            --home-dir "$APP_DIR" \
+            "$CROSSPOINT_USER"
+    fi
+    
+    cmd_exec chown -R "$CROSSPOINT_USER:$CROSSPOINT_GROUP" "$APP_DIR"
+    
     log_info "Installing npm dependencies..."
     cmd_exec npm install
-    cmd_exec npm audit fix || true
     cmd_exec npm run build
     
     log_info "Generating encryption token..."
-    TOKEN_KEY=$(openssl rand -hex 32)
-    cmd_exec echo "$TOKEN_KEY" > "$APP_DIR/token.key"
-    cmd_exec chown "$CROSSPOINT_USER:$CROSSPOINT_GROUP" "$APP_DIR/token.key"
-    cmd_exec chmod 600 "$APP_DIR/token.key"
-    
+    if [[ -f "$APP_DIR/token.key" ]]; then
+        log_info "Existing encryption token found; preserving it."
+        TOKEN_KEY="$(<"$APP_DIR/token.key")"
+    else
+        log_info "Generating new encryption token..."
+        TOKEN_KEY="$(openssl rand -hex 32)"
+        printf '%s\n' "$TOKEN_KEY" > "$APP_DIR/token.key"
+
+        cmd_exec chown "$CROSSPOINT_USER:$CROSSPOINT_GROUP" "$APP_DIR/token.key"
+        cmd_exec chmod 600 "$APP_DIR/token.key"
+    fi
+
+
     log_info "Creating environment file..."
-    cmd_exec cat > "$APP_DIR/env" << ENVFILE
+    if [[ ! -f "$APP_DIR/env" ]]; then
+            # Proxy configuration prompt
+        log_info "Change TRUST_PROXY to true if using proxy, such as CF Tunnel"
+        echo ""
+        if confirm "Is CrossPoint-sync running behind a reverse proxy? (e.g., Cloudflare Tunnel, nginx)" "n"; then
+            TRUST_PROXY_VALUE="true"
+        else
+            TRUST_PROXY_VALUE="false"
+            log_info "Will set TRUST_PROXY=false (direct access mode)"
+        fi
+            log_info "Creating CrossPoint environment file..."
+
+        cat > "$APP_DIR/env" << ENVFILE
 PORT=${CROSSPOINT_PORT}
 DATABASE_PATH=$APP_DIR/crosspoint.db
 REGISTRATION_DISABLED=false
 AUTH_RATE_LIMIT_PER_MINUTE=30
 TOKEN_ENC_KEY=${TOKEN_KEY}
-TRUST_PROXY=true
+TRUST_PROXY=${TRUST_PROXY_VALUE}
 CORS_ORIGINS=
 LOG_LEVEL=info
 ENVFILE
-    cmd_exec chmod 600 "$APP_DIR/env"
-    
+
+        cmd_exec chmod 600 "$APP_DIR/env"
+    else
+        log_info "Existing CrossPoint environment file found; preserving it."
+    fi
+
+    log_info "Env file created. To change TRUST_PROXY:"
+    log_info "  Edit: $APP_DIR/env"
+    log_info "  Then: sudo systemctl restart crosspoint-sync"
     log_info "Creating systemd service..."
-    cmd_exec cat > /etc/systemd/system/crosspoint-sync.service << SERVICE
+    
+    cat > /etc/systemd/system/crosspoint-sync.service << SERVICE
 [Unit]
 Description=CrossPoint Sync Server
 After=network.target
@@ -613,27 +893,26 @@ SERVICE
     cmd_exec systemctl start crosspoint-sync
     sleep 2
     
-    systemctl is-active --quiet crosspoint-sync && \
-        log_success "CrossPoint Sync running at http://localhost:${CROSSPOINT_PORT}" || \
-        log_warn "CrossPoint Sync service failed. Check logs."
+    verify_service_status "crosspoint-sync" "CrossPoint Sync" || true
 }
 
 step_navidrome() {
     section_header "Navidrome Music Server"
     
     NAVIDROME_VERSION="0.63.2"
-    DEB_URL="https://github.com/navidrome/navidrome/releases/download/v${NAVIDROME_VERSION}/navidrome_${NAVIDROME_VERSION}_linux_amd64.deb"
+    DEB_URL="https://github.com/navidrome/navidrome/releases/download/v${NAVIDROME_VERSION}/navidrome_${NAVIDROME_VERSION}_linux_${ARCH}.deb"
     
     log_info "Downloading Navidrome..."
-    cmd_exec mkdir -p ~/Downloads
-    cd ~/Downloads
+    cmd_exec mkdir -p /tmp/navidrome
+    cd /tmp/navidrome
     cmd_exec wget -q "$DEB_URL"
 
     log_info "Opening firewall port..."
-    cmd_exec ufw allow 4533/tcp   # Navidrome
+    cmd_exec ufw allow "${NAVIDROME_PORT}/tcp"   # Navidrome
     
     log_info "Installing Navidrome..."
-    cmd_exec apt-get install -y ./navidrome_${NAVIDROME_VERSION}_linux_amd64.deb
+    cmd_exec apt-get install -y ./navidrome_${NAVIDROME_VERSION}_linux_${ARCH}.deb
+    cmd_exec rm -f "./navidrome_${NAVIDROME_VERSION}_linux_${ARCH}.deb"
     
     log_info "Creating music library directory..."
     cmd_exec mkdir -p "$MUSIC_LIBRARY"
@@ -641,25 +920,42 @@ step_navidrome() {
     
     log_info "Configuring Navidrome..."
     cmd_exec mkdir -p /etc/navidrome
-    cmd_exec cat > /etc/navidrome/navidrome.toml << CONFIG
+    if [[ -f /etc/navidrome/navidrome.toml ]]; then
+        log_info "Existing Navidrome configuration found; preserving it."
+    else
+        cat > /etc/navidrome/navidrome.toml << CONFIG
 MusicFolder = "${MUSIC_LIBRARY}"
-Port = ${NAVDROME_PORT}
+Port = ${NAVIDROME_PORT}
 DataDir = "/var/lib/navidrome"
 LogLevel = "info"
 CONFIG
+    fi
     
     log_info "Enabling and starting service..."
     cmd_exec systemctl enable navidrome
     cmd_exec systemctl start navidrome
     
-    systemctl is-active --quiet navidrome && \
-        log_success "Navidrome running at http://localhost:${NAVDROME_PORT}" || \
-        log_warn "Navidrome service failed. Check logs."
+    verify_service_status "navidrome" "Navidrome" || true
 }
 
 #-------------------------------------------------------------------------------
 # UNINSTALL FUNCTIONS
 #-------------------------------------------------------------------------------
+
+apt_remove_if_installed() {
+    local packages=()
+
+    for package in "$@"; do
+        if dpkg-query -W -f='${Status}' "$package" 2>/dev/null \
+            | grep -q "install ok installed"; then
+            packages+=("$package")
+        fi
+    done
+
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        cmd_exec apt-get remove --purge -y "${packages[@]}"
+    fi
+}
 
 uninstall_searxng() {
     section_header "Removing SearxNG"
@@ -708,6 +1004,8 @@ uninstall_calibre() {
     
     log_action "Cleaning up library ACLs..."
     cmd_exec setfacl -R -b "$CALIBRE_LIBRARY" 2>/dev/null || true
+
+    cmd_exec ufw delete allow ${CALIBRE_PORT}/tcp
     
     log_success "Calibre-Web removed successfully"
     log_warn "Note: Your calibre library at $CALIBRE_LIBRARY is preserved"
@@ -732,9 +1030,8 @@ uninstall_crosspoint() {
     
     log_action "Removing CrossPoint user..."
     cmd_exec deluser --remove-home "$CROSSPOINT_USER" 2>/dev/null || true
-    
-    log_action "Cleaning Node.js packages..."
-    cmd_exec npm cache clean -f 2>/dev/null || true
+
+    cmd_exec ufw delete allow ${CROSSPOINT_PORT}/tcp
     
     log_success "CrossPoint Sync removed successfully"
 }
@@ -747,17 +1044,18 @@ uninstall_navidrome() {
     cmd_exec systemctl disable navidrome 2>/dev/null || true
     
     log_action "Removing Navidrome package..."
-    cmd_exec apt-get remove -y navidrome
+    apt_remove_if_installed navidrome
     
     log_action "Removing configuration..."
     cmd_exec rm -rf /etc/navidrome
-    cmd_exec rm -rf /var/lib/navidrome
-    
-    log_action "Cleaning up Debian package..."
-    cmd_exec dpkg -r navidrome 2>/dev/null || true
+
+    cmd_exec ufw delete allow ${NAVIDROME_PORT}/tcp
     
     log_success "Navidrome removed successfully"
-    log_warn "Note: Your music library at $MUSIC_LIBRARY is preserved"
+    log_warn "Navidrome music library preserved: $MUSIC_LIBRARY"
+    log_warn "Navidrome application data preserved: /var/lib/navidrome"
+    log_warn "To completely remove Navidrome data:"
+    log_warn "  rm -rf /var/lib/navidrome"
 }
 
 uninstall_web() {
@@ -768,16 +1066,17 @@ uninstall_web() {
     cmd_exec systemctl disable apache2 2>/dev/null || true
     
     log_action "Removing Apache2 and PHP packages..."
-    cmd_exec apt-get remove --purge -y apache2 apache2-utils apache2-bin \
+    apt_remove_if_installed apache2 apache2-utils apache2-bin \
         php php-cli php-common libapache2-mod-php
     
     log_action "Removing Apache configuration..."
-    cmd_exec rm -rf /etc/apache2
-    cmd_exec rm -rf /var/www/html
-    cmd_exec rm -rf /var/www/http
+    cmd_exec rm -rf /etc/apache2/sites-available/$SITENAME.conf
     
     log_action "Cleaning systemd..."
     cmd_exec systemctl daemon-reload
+
+    cmd_exec ufw delete allow ${APACHE_PORT}/tcp
+    cmd_exec ufw delete allow ${APACHE_SEC_PORT}/tcp
     
     log_success "Web server removed successfully"
     log_warn "Warning: This removes ALL web hosting capability including SearxNG"
@@ -791,27 +1090,38 @@ uninstall_sharing() {
     cmd_exec systemctl disable smbd nmbd 2>/dev/null || true
     
     log_action "Removing Samba..."
-    cmd_exec apt-get remove --purge -y samba nemo nemo-share
+    apt_remove_if_installed samba nemo nemo-share
+    cmd_exec ufw delete allow 445/tcp 2>/dev/null || true
     
     log_action "Removing Tailscale..."
-    cmd_exec apt-get remove -y tailscale
+    apt_remove_if_installed tailscale
     cmd_exec systemctl disable tailscaled 2>/dev/null || true
     cmd_exec systemctl stop tailscaled 2>/dev/null || true
-    
-    log_action "Cleaning Samba directories..."
-    cmd_exec rm -rf /srv/samba
     
     log_action "Cleaning systemd..."
     cmd_exec systemctl daemon-reload
     
     log_success "File sharing services removed successfully"
+    log_warn "Existing Samba configuration backups were preserved."
+    log_warn "Samba data preserved at /srv/samba/shared"
 }
 
 uninstall_all() {
     section_header "FULL SYSTEM CLEANUP"
     
-    log_warn "This will remove ALL services and configurations!"
-    log_warn "Your personal library files will be preserved where configured"
+    log_warn "The following will be removed:"
+    log_warn "  - Apache/PHP"
+    log_warn "  - Samba/Tailscale"
+    log_warn "  - SearxNG"
+    log_warn "  - Calibre-Web application"
+    log_warn "  - CrossPoint Sync application"
+    log_warn "  - Navidrome application"
+    log_warn "  - Managed system users/configuration"
+    log_warn ""
+    log_warn "The following will be preserved:"
+    log_warn "  - $CALIBRE_LIBRARY"
+    log_warn "  - $MUSIC_LIBRARY"
+    log_warn "  - /srv/samba/shared"
     
     if ! confirm "Are you absolutely sure? This cannot be undone!"; then
         log_info "Uninstall cancelled"
@@ -828,21 +1138,16 @@ uninstall_all() {
     uninstall_searxng
     uninstall_web
     uninstall_sharing
-    
-    log_action "Removing remaining users..."
-    cmd_exec deluser --remove-home acw 2>/dev/null || true
-    cmd_exec deluser --remove-home cps 2>/dev/null || true
-    cmd_exec deluser --remove-home searxng 2>/dev/null || true
-    
+        
     log_action "Cleaning systemd..."
     cmd_exec systemctl daemon-reload
     
     log_action "Clearing apt cache..."
-    cmd_exec apt-get autoremove -y
-    cmd_exec apt-get autoclean
+    log_action "Skipping automatic package cleanup."
+    log_info "No apt autoremove will be performed because dependencies may be used by other software."
     
     log_success "============================================"
-    log_success "SYSTEM COMPLETELY CLEANED!"
+    log_success "UNINSTALL COMPLETE!"
     log_success "============================================"
 }
 
@@ -869,6 +1174,12 @@ parse_args() {
                 shift
                 ;;
             --install-all|--install-sharing|--install-web|--install-searxng|--install-calibre|--install-sync|--install-navidrome)
+                if [[ -n "$OPERATION_MODE" && "$OPERATION_MODE" != "install" ]]; then
+                    log_error "Cannot combine install and uninstall options."
+                    exit 1
+                fi
+
+                OPERATION_MODE="install"
                 INSTALL_MODE=true
                 # Set specific flags
                 case "$1" in
@@ -902,10 +1213,21 @@ parse_args() {
                 shift
                 ;;
             --reinstall)
+                if [[ -n "$OPERATION_MODE" ]]; then
+                    log_error "Cannot combine --reinstall with install or uninstall options."
+                    exit 1
+                fi
+
+                OPERATION_MODE="reinstall"
                 REINSTALL_MODE=true
                 shift
                 ;;
             --uninstall-all|--uninstall-sharing|--uninstall-web|--uninstall-searxng|--uninstall-calibre|--uninstall-sync|--uninstall-navidrome)
+                if [[ -n "$OPERATION_MODE" && "$OPERATION_MODE" != "uninstall" ]]; then
+                    log_error "Cannot combine install and uninstall options."
+                    exit 1
+                fi
+                OPERATION_MODE="uninstall"
                 UNINSTALL_MODE=true
                 # Set specific flags
                 case "$1" in
@@ -942,10 +1264,73 @@ parse_args() {
     done
 }
 
+
+reinstall_all() {
+    SERVICES_CHECKED=()
+    FAILED_SERVICES=()
+
+    section_header "FULL REINSTALL / REPAIR"
+
+    log_warn "Reinstall mode will repair/reconfigure all services managed by this script."
+    log_warn "It will NOT run the uninstall functions."
+    log_warn "It will NOT remove system packages."
+    log_warn "Library data and application data will be preserved."
+    log_warn "Existing application configuration will be preserved where supported."
+
+    if ! confirm "Continue with full reinstall?" "n"; then
+        log_info "Reinstall cancelled"
+        return 1
+    fi
+
+    log_action "Stopping managed services..."
+
+    cmd_exec systemctl stop \
+        calibre-web-nextgen \
+        crosspoint-sync \
+        navidrome \
+        apache2 \
+        uwsgi \
+        smbd \
+        2>/dev/null || true
+
+    # Reinstall/repair in the same dependency order as a full installation.
+    INSTALL_SHARING=true
+    INSTALL_WEB=true
+    INSTALL_SEARXNG=true
+    INSTALL_CALIBRE=true
+    INSTALL_CROSSPOINT=true
+    INSTALL_NAVIDROME=true
+
+    step_system_prep
+    step_file_sharing
+    step_web_server
+    step_searxng
+    step_calibre
+    step_crosspoint
+    step_navidrome
+
+    log_info "=== Reinstall Health Report ==="
+
+    if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
+        log_warn "⚠ ${#FAILED_SERVICES[@]} service check(s) failed:"
+        for entry in "${FAILED_SERVICES[@]}"; do
+            IFS='|' read -r svc display <<< "$entry"
+            log_error "   ✗ ${display} (${svc})"
+            echo "     journalctl -u ${svc} -n 50 --no-pager"
+        done
+        return 1
+    fi
+
+    log_success "✓ Reinstall completed successfully."
+}
+
+
 execute_install() {
+    SERVICES_CHECKED=()
+    FAILED_SERVICES=()
     log_info "Execution Mode: INSTALL"
     
-    if [[ -z "${INSTALL_MODE+x}" && -z "${REINSTALL_MODE+x}" ]]; then
+    if [[ "${INSTALL_MODE}" == false ]]; then
         # No specific flags, run full install
         INSTALL_SHARING=true
         INSTALL_WEB=true
@@ -980,7 +1365,25 @@ execute_install() {
     if [[ "${INSTALL_NAVIDROME}" == true ]]; then
         step_navidrome
     fi
-    
+
+        # Aggregate service health report
+    # Show results for only checked services
+    log_info "=== Service Health Report ==="
+    if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
+        log_warn "⚠ ${#FAILED_SERVICES[@]} service check(s) failed:"
+        for entry in "${FAILED_SERVICES[@]}"; do
+            IFS='|' read -r svc display <<< "$entry"
+            log_error "   ✗ ${display} (${svc})"
+            echo "     journalctl -u ${svc} -n 50 --no-pager"
+        done
+        log_warn "Installation completed with service errors."
+        echo ""
+        installation_summary
+        return 1
+    fi
+    log_success "✓ ${#SERVICES_CHECKED[@]} checked services are running"
+    echo ""
+
     installation_summary
 }
 
@@ -1022,16 +1425,30 @@ execute_uninstall() {
 main() {
     check_root
     parse_args "$@"
-    
-    # Determine operation mode
-    if [[ -n "${UNINSTALL_MODE+x}" ]]; then
-        execute_uninstall
-    elif [[ -n "${INSTALL_MODE+x}" || -n "${REINSTALL_MODE+x}" || $# -eq 0 ]]; then
-        execute_install
-    else
-        usage
-        exit 1
-    fi
+    validate_config
+    case "${OPERATION_MODE:-install}" in
+        install|reinstall)
+            validate_config
+            ;;
+        uninstall)
+            ;;
+        *)
+            log_error "Invalid operation mode."
+            exit 1
+            ;;
+    esac
+
+    case "${OPERATION_MODE:-install}" in
+        install)
+            execute_install
+            ;;
+        uninstall)
+            execute_uninstall
+            ;;
+        reinstall)
+            reinstall_all
+            ;;
+    esac
 }
 
 #-------------------------------------------------------------------------------
@@ -1055,7 +1472,7 @@ Services Available:
 │ SearxNG             │ http://$(hostname)/searxng          │
 │ Calibre-Web         │ http://$(hostname):${CALIBRE_PORT}/ │
 │ CrossPoint Sync     │ http://$(hostname):${CROSSPOINT_PORT}/ │
-│ Navidrome           │ http://$(hostname):${NAVDROME_PORT}/│
+│ Navidrome           │ http://$(hostname):${NAVIDROME_PORT}/│
 └─────────────────────┴──────────────────────────────────────┘
 
 Quick Reference Commands:
@@ -1073,9 +1490,21 @@ Quick Reference Commands:
   
   ─ Reinstall Any Service ─
   sudo $0 --install-[service-name]
+  --install-sharing
+  --install-web
+  --install-searxng
+  --install-calibre
+  --install-sync
+  --install-navidrome
   
   ─ Uninstall Any Service ─
   sudo $0 --uninstall-[service-name]
+  --uninstall-sharing
+  --uninstall-web
+  --uninstall-searxng
+  --uninstall-calibre
+  --uninstall-sync
+  --uninstall-navidrome
   
   ─ Full Cleanup ─
   sudo $0 --uninstall-all
@@ -1084,7 +1513,6 @@ Configuration Notes:
 
   • Library path: $CALIBRE_LIBRARY
   • Calibre installed: Yes (apt install calibre)
-  • Calibre-Web initialized with README.md: Yes
   • Music path: $MUSIC_LIBRARY
 
 Post-Installation Tasks:
