@@ -24,10 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCH="$(dpkg --print-architecture)"
 
 # Web Addresses
-YOURDOMAIN="yourdomain.com"
-SUBDOMAIN="yoursubdomain"   #like yoursubdomain.yourdomain.com(Only used if apache will not be serving www)
-SITENAME="yoursitename"    #This determines apache's .conf and ensite. can be practically anything you want, EXCEPT 000-default
-YOUREMAIL="youremail@domain.com"
+YOURDOMAIN="yourdomain.com" #for local use, tailscale funnel, and Cloudflare Tunnels, this can be "localhost"
+SUBDOMAIN="yoursubdomain"   #like yoursubdomain.yourdomain.com(Only used if apache will not be serving at www.)
+SITENAME="yoursitename"    #This determines apache's .conf and ensite. can be practically anything you want, EXCEPT "000-default"
+YOUREMAIL="youremail@domain.com" #for apache config, not actually necessary, and certainly not sent anywhere.
 
 # Library Paths
 # This is where your calibre books/ebooks are/will be stored
