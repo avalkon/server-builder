@@ -1,10 +1,12 @@
 # server-builder
 
 Script to fully set up a Mint or Ubuntu server with apache, samba, tailscale, searxng, calibre-web-nextgen, crosspoint-sync, and navidrome.
+Does not invoke Docker, ever. Fully bare-metal Mint/Ubuntu.
 
 # How to use
 
-To use, simply download, set as executable, and execute using the relevant commands to install, reinstall, or uninstall one or more or all services.
+To use, simply download, open in text editor (sudo nano ./server-install.sh), fill in the necessary fields near the top, save,
+set as executable, and execute using the relevant commands to install, reinstall, or uninstall one or more or all services.
 
  # Usage Examples:
    sudo ./server-install.sh --install_all          # Full installation (silent)
@@ -30,9 +32,9 @@ To use, simply download, set as executable, and execute using the relevant comma
     --uninstall-sharing          Remove Samba, Tailscale, Nemo
     --uninstall-web              Remove Apache + PHP
     --uninstall-searxng          Remove SearxNG
-    --uninstall-calibre          Remove Calibre-Web (keeps library)
+    --uninstall-calibre          Remove Calibre-Web NextGen (keeps library)
     --uninstall-sync             Remove CrossPoint Sync
-    --uninstall-navidrome        Remove Navidrome
+    --uninstall-navidrome        Remove Navidrome (keeps music library)
 
 # Utility Commands:
     --status                     Show status of all services
@@ -43,3 +45,4 @@ To use, simply download, set as executable, and execute using the relevant comma
   - Most services are independent; order matters for dependencies; searxng relies on apache in this script and cannot run without it. Apache does not rely on searxng.
   - Personal library files and some settings files are preserved during uninstallation
   - Uninstallation does not remove apt packages in case of other dependencies. You can run apt autoremove afterwords if you want.
+  - Auto-ingest may not run without extra work on non-docker installs of calibre-web-nextgen.
