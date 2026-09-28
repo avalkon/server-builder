@@ -5,11 +5,11 @@
 # Version: 3.1
 # Date: 2026-09-27
 # Usage Examples:
-#   sudo ./unified_install.sh                    # Full installation (silent)
-#   sudo ./unified_install.sh -v                 # Full installation (verbose)
-#   sudo ./unified_install.sh --install-sync     # Only CrossPoint Sync
-#   sudo ./unified_install.sh --uninstall-navidrome
-#   sudo ./unified_install.sh -v --uninstall-all
+#   sudo ./server-install.sh                    # Full installation (silent)
+#   sudo ./server-install.sh -v                 # Full installation (verbose)
+#   sudo ./server-install.sh --install-sync     # Only CrossPoint Sync
+#   sudo ./server-install.sh --uninstall-navidrome
+#   sudo ./server-install.sh -v --uninstall-all
 #===============================================================================
 
 set -euo pipefail
