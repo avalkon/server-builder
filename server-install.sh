@@ -309,17 +309,7 @@ show_status() {
         printf "%-20s %-15s %-10s %-8s %s\n" \
             "samba" "not-installed" "N/A" "445" "$(date '+%H:%M:%S')"
     fi
-    
-    # Tailscale
-    if command -v tailscale >/dev/null 2>&1; then
-        TAIL_STATUS=$(tailscale status 2>/dev/null | head -1 | cut -c1-30 || printf 'unknown')
-        printf "%-20s %-15s %-10s %-8s %s\n" \
-            "tailscale" "installed" "$TAIL_STATUS" "-" "$(date '+%H:%M:%S')"
-    else
-        printf "%-20s %-15s %-10s %-8s %s\n" \
-            "tailscale" "not-installed" "N/A" "-" "$(date '+%H:%M:%S')"
-    fi
-    
+
     # SearxNG (runs under uWSGI)
     SEARXNG_HTTP_STATUS=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
         "http://localhost:${APACHE_PORT}/searxng/" \
@@ -333,7 +323,18 @@ show_status() {
             "searxng" "stopped" "N/A" \
             "${APACHE_PORT}" "$(date '+%H:%M:%S')"
     fi
+    
+    # Tailscale
+    if command -v tailscale >/dev/null 2>&1; then
+        TAIL_STATUS=$(tailscale status 2>/dev/null | head -1 | cut -c1-34 || printf "")
+        printf "%-20s %-35s %s\n" \
+            "tailscale" "$TAIL_STATUS" "$(date '+%H:%M:%S')"
+    else
+        printf "%-20s %-34s %s\n" \
+            "tailscale" "not-installed" "$(date '+%H:%M:%S')"
+    fi
 
+    
     echo ""
     log_info "Run 'systemctl status <service>' for detailed service information."
 }
