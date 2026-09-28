@@ -9,11 +9,11 @@ To use, simply download, open in text editor (sudo nano ./server-install.sh), fi
 set as executable, and execute using the relevant commands to install, reinstall, or uninstall one or more or all services.
 
  # Usage Examples:
-   sudo ./server-install.sh --install_all          # Full installation (silent)
-   sudo ./server-install.sh -v --install_all       # Full installation (verbose)
-   sudo ./server-install.sh --install-sync         # Only CrossPoint Sync
-   sudo ./server-install.sh --uninstall-navidrome  # Only Uninstall Navidrome
-   sudo ./server-install.sh -v --uninstall-all     # Uninstall everything (verbose)
+   - sudo ./server-install.sh --install_all          # Full installation (silent)
+   - sudo ./server-install.sh -v --install_all       # Full installation (verbose)
+   - sudo ./server-install.sh --install-sync         # Only CrossPoint Sync
+   - sudo ./server-install.sh --uninstall-navidrome  # Only Uninstall Navidrome
+   - sudo ./server-install.sh -v --uninstall-all     # Uninstall everything (verbose)
 
 # Installation Modes:
     --install-all                Install everything
