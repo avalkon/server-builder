@@ -799,29 +799,72 @@ step_searxng() {
     cd searxng
     
     log_info "Modifying platform detection for Linux Mint compatibility..."
-    [[ -f utils/searxng.sh.bak ]] || cmd_exec cp utils/searxng.sh utils/searxng.sh.bak
-    [[ -f utils/lib.sh.bak ]] || cmd_exec cp utils/lib.sh utils/lib.sh.bak
-    if grep -q 'linuxmint-\*' utils/searxng.sh; then
-        log_info "SearxNG Linux Mint compatibility already applied."
-    else
+        [[ -f utils/searxng.sh.bak ]] || cmd_exec cp utils/searxng.sh utils/searxng.sh.bak
+        [[ -f utils/lib.sh.bak ]] || cmd_exec cp utils/lib.sh utils/lib.sh.bak
+
+
+    [[ -f utils/searxng.sh.bak ]] || \
+        cmd_exec cp utils/searxng.sh utils/searxng.sh.bak
+
+    [[ -f utils/lib.sh.bak ]] || \
+        cmd_exec cp utils/lib.sh utils/lib.sh.bak
+
+    #
+    # searxng.sh
+    #
+    if grep -Fq 'linuxmint-*' utils/searxng.sh; then
+        log_info "Linux Mint platform entry already present in utils/searxng.sh."
+    elif grep -Fq 'ubuntu-* | debian-*' utils/searxng.sh; then
         cmd_exec sed -i \
-            's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' \
+            's/ubuntu-\* | debian-\*/ubuntu-* | debian-* | linuxmint-*/g' \
             utils/searxng.sh
-    fi
-    if grep -q 'linuxmint-\*' utils/lib.sh; then
-        log_info "SearxNG Linux Mint compatibility already applied." 
     else
-        cmd_exec sed -i \
-            's/ubuntu-\* |debian-\*/ubuntu-* |debian-* |linuxmint-*/g' \
-            utils/lib.sh
-    fi    
-    if grep -q 'linuxmint-\ ' utils/lib.sh; then
-        log_info "SearxNG Linux Mint compatibility already applied."
-    else
-        cmd_exec sed -i \
-            's/ubuntu |debian/ubuntu |debian |linuxmint/g' \
-            utils/lib.sh
+        log_error "Could not locate expected platform detection in utils/searxng.sh."
+        grep -nE 'ubuntu|debian|DIST|OS' utils/searxng.sh || true
+        return 1
     fi
+
+    #
+    # lib.sh: distro-version case
+    #
+    if grep -Fq 'linuxmint-*' utils/lib.sh; then
+    log_info "Linux Mint version entry already present in utils/lib.sh."
+    elif grep -Fq 'ubuntu-* | debian-*' utils/lib.sh; then
+        cmd_exec sed -i \
+            's/ubuntu-\* | debian-\*/ubuntu-* | debian-* | linuxmint-*/g' \
+            utils/lib.sh
+    else
+        log_warn "Could not locate ubuntu/debian version pattern in utils/lib.sh."
+    fi
+
+    #
+    # lib.sh: distro-name case
+    #
+    if grep -Eq 'ubuntu[[:space:]]*\|[[:space:]]*debian[[:space:]]*\|[[:space:]]*linuxmint' \
+            utils/lib.sh; then
+        log_info "Linux Mint distro entry already present in utils/lib.sh."
+    elif grep -Eq 'ubuntu[[:space:]]*\|[[:space:]]*debian' utils/lib.sh; then
+        cmd_exec sed -Ei \
+            's/ubuntu[[:space:]]*\|[[:space:]]*debian/ubuntu | debian | linuxmint/g' \
+            utils/lib.sh
+    else
+        log_warn "Could not locate ubuntu/debian distro pattern in utils/lib.sh."
+    fi
+
+    #
+    # Verify the patch actually happened.
+    #
+    if ! grep -q 'linuxmint' utils/searxng.sh; then
+        log_error "Linux Mint patch failed for utils/searxng.sh."
+        return 1
+    fi
+
+    if ! grep -q 'linuxmint' utils/lib.sh; then
+        log_error "Linux Mint patch failed for utils/lib.sh."
+        return 1
+    fi
+
+log_success "Linux Mint platform compatibility applied."
     log_info "Creating SearxNG system user..."
     cmd_exec useradd --shell /bin/bash --system --home-dir "/usr/local/searxng" \
         --comment 'Privacy-respecting metasearch engine' searxng 2>/dev/null || true
