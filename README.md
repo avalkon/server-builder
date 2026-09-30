@@ -5,40 +5,48 @@ Does not invoke Docker, ever. Fully bare-metal Mint/Ubuntu.
 
 # How to use
 
-To use, simply download, open in text editor (sudo nano ./server-install.sh), fill in the necessary fields near the top, save,
-set as executable, and execute using the relevant commands to install, reinstall, or uninstall one or more or all services.
+To use, simply download, set as executable(chmod +x ./server-install.sh), and execute using the relevant commands to install, reinstall, or uninstall one or more or all services. The installer will prompt you for paths to your library and music, along with your domain(example.com), sitename(the filename apache uses for your config files, anything but 000-default), and subdomain(optional)
 
- # Usage Examples:
-   - sudo ./server-install.sh --install_all          # Full installation (silent)
-   - sudo ./server-install.sh -v --install_all       # Full installation (verbose)
-   - sudo ./server-install.sh --install-sync         # Only CrossPoint Sync
-   - sudo ./server-install.sh --uninstall-navidrome  # Only Uninstall Navidrome
-   - sudo ./server-install.sh -v --uninstall-all     # Uninstall everything (verbose)
-
-# Installation Modes:
-    --install-all                Install everything
+# OPTIONS:
+  Installation Modes:
+    (no args)                    Show this help message
+    --install-all                Run complete installation of all services
     --reinstall                  Reinstall/repair all managed services without deleting libraries
 
-# Selective Installation:
+  Selective Installation:
     --install-sharing            Install file sharing (Samba, Tailscale, Nemo)
     --install-web                Install web server (Apache + PHP)
-    --install-searxng            Install SearxNG search engine
-    --install-calibre            Install Calibre-Web NextGen (includes Calibre)
+    --install-searxng            Install SearxNG search engine(requires Apache)
+    --install-calibre            Install Calibre-Web-NextGen--no-docker (also installs the most recent Calibre)
     --install-sync               Install CrossPoint Sync only
     --install-navidrome          Install Navidrome music server only
 
-# Uninstallation Modes:
+  Uninstallation Modes:
     --uninstall-all              Remove all managed services and packages
     --uninstall-sharing          Remove Samba, Tailscale, Nemo
     --uninstall-web              Remove Apache + PHP
     --uninstall-searxng          Remove SearxNG
-    --uninstall-calibre          Remove Calibre-Web NextGen (keeps library)
+    --uninstall-calibre          Remove Calibre-Web (keeps library)
     --uninstall-sync             Remove CrossPoint Sync
-    --uninstall-navidrome        Remove Navidrome (keeps music library)
+    --uninstall-navidrome        Remove Navidrome
 
-# Utility Commands:
+  Utility Commands:
     --status                     Show status of all services
-    --help,-h                    Show the help message
+    --help,-h                    Show this help message
+
+  Verbosity:
+    -v, --verbose                Show every command being executed
+    -s, --silent                 Minimal output (default)
+
+# EXAMPLES:
+  sudo ./server-install.sh                              # Show help
+  sudo ./server-install.sh -v                           # Show help
+  sudo ./server-install.sh --install-all                # Full installation
+  sudo ./server-install.sh -v --install-all             # Full installation (verbose)
+  sudo ./server-install.sh -v --install-sync            # Install CrossPoint Sync verbosely
+  sudo ./server-install.sh --uninstall-navidrome        # Remove Navidrome only
+  sudo ./server-install.sh --uninstall-all              # Remove everything
+  sudo ./server-install.sh -v --status                  # Check service status verbosely
 
 # NOTES:
   - All operations require root privileges
