@@ -5,11 +5,10 @@
 # Version: 3.1
 # Date: 2026-09-27
 # Usage Examples:
-#   sudo ./server-install.sh                    # Full installation (silent)
-#   sudo ./server-install.sh -v                 # Full installation (verbose)
-#   sudo ./server-install.sh --install-sync     # Only CrossPoint Sync
-#   sudo ./server-install.sh --uninstall-navidrome
-#   sudo ./server-install.sh -v --uninstall-all
+#    sudo ./server-install.sh                    # Show help
+#    sudo ./server-install.sh -v                 # Show help
+#    sudo ./server-install.sh --install-all      # Full installation
+#    sudo ./server-install.sh -v --install-all   # Full installation (verbose)
 #===============================================================================
 
 set -euo pipefail
@@ -33,7 +32,7 @@ YOUREMAIL="youremail@domain.com" #for apache config, not actually necessary, and
 # This is where your calibre books/ebooks are/will be stored
 CALIBRE_LIBRARY="/path/to/books/library"
 # This is where auto ingest looks for books. Reccomend using the default.
-INGEST_DIR="srv/calibre-ingest"
+INGEST_DIR="/srv/calibre-ingest"
 
 # Music Path
 MUSIC_LIBRARY="/path/to/music/library"
@@ -107,16 +106,6 @@ check_root() {
     fi
 }
 
-if [[ "$CALIBRE_LIBRARY" == "/path/to/books/library" ]]; then
-    log_error "Please configure CALIBRE_LIBRARY before installation."
-    return 1
-fi
-
-if [[ "$MUSIC_LIBRARY" == "/path/to/music/library" ]]; then
-    log_error "Please configure MUSIC_LIBRARY before installation."
-    return 1
-fi
-
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
     CURRENT_USER="${SUDO_USER}"
 else
@@ -139,6 +128,16 @@ confirm() {
 }
 
 validate_config() {
+
+    if [[ "$CALIBRE_LIBRARY" == "/path/to/books/library" ]]; then
+        log_error "Please configure CALIBRE_LIBRARY before installation."
+        return 1
+    fi
+
+    if [[ "$MUSIC_LIBRARY" == "/path/to/music/library" ]]; then
+        log_error "Please configure MUSIC_LIBRARY before installation."
+        return 1
+    fi
     [[ -n "$CALIBRE_LIBRARY" ]] || {
         log_error "CALIBRE_LIBRARY is empty."
         return 1
@@ -190,8 +189,8 @@ Install/Manage self-hosted server services
 
 OPTIONS:
   Installation Modes:
-    (no args)                    Run complete installation of all services
-    --install-all                Same as no args - install everything
+    (no args)                    Show this help message
+    --install-all                Run complete installation of all services
     --reinstall                  Reinstall/repair all managed services without deleting libraries
 
   Selective Installation:
@@ -741,7 +740,7 @@ step_calibre() {
     "retry_interval_seconds": 300,
     "checkpoint_file": "${INSTALL_DIR}/.meta_checkpoint",
     "status_file": "${CONFIG_DIR}/cwa_ingest_status",
-    "meta_status_file": "{CONFIG_DIR}/cwa_meta_status"
+    "meta_status_file": "${CONFIG_DIR}/cwa_meta_status"
 }
 EOF
     
@@ -1078,11 +1077,17 @@ uninstall_calibre() {
     INSTALL_DIR="/opt/calibre-web-nextgen"
     CONFIG_DIR="${INSTALL_DIR}/config"
     
-    log_action "Stopping Calibre-Web service..."
+    log_action "Stopping Calibre-Web services..."
+    cmd_exec systemctl stop calibre-web-ingest 2>/dev/null || true
+    cmd_exec systemctl stop calibre-web-meta 2>/dev/null || true
     cmd_exec systemctl stop calibre-web-nextgen 2>/dev/null || true
+    cmd_exec systemctl disable calibre-web-ingest 2>/dev/null || true
+    cmd_exec systemctl disable calibre-web-meta 2>/dev/null || true
     cmd_exec systemctl disable calibre-web-nextgen 2>/dev/null || true
     
-    log_action "Removing systemd service..."
+    log_action "Removing systemd services..."
+    cmd_exec rm -f /etc/systemd/system/calibre-web-ingest.service
+    cmd_exec rm -f /etc/systemd/system/calibre-web-meta.service
     cmd_exec rm -f /etc/systemd/system/calibre-web-nextgen.service
     cmd_exec systemctl daemon-reload
     
@@ -1220,7 +1225,7 @@ uninstall_all() {
     fi
     
     log_action "Stopping all services..."
-    cmd_exec systemctl stop calibre-web-nextgen crosspoint-sync navidrome uwsgi apache2 2>/dev/null || true
+    cmd_exec systemctl stop calibre-web-nextgen calibre-web-ingest calibre-web-meta crosspoint-sync navidrome uwsgi apache2 2>/dev/null || true
     
     log_action "Running individual uninstallers..."
     uninstall_navidrome
@@ -1514,28 +1519,26 @@ execute_uninstall() {
 main() {
     check_root
     parse_args "$@"
-    validate_config
-    case "${OPERATION_MODE:-install}" in
-        install|reinstall)
-            validate_config
-            ;;
-        uninstall)
-            ;;
-        *)
-            log_error "Invalid operation mode."
-            exit 1
-            ;;
-    esac
+    if [[ -z "$OPERATION_MODE" ]]; then
+        usage
+        exit 0
+    fi
 
-    case "${OPERATION_MODE:-install}" in
+    case "$OPERATION_MODE" in
         install)
+            validate_config
             execute_install
+            ;;
+        reinstall)
+            validate_config
+            reinstall_all
             ;;
         uninstall)
             execute_uninstall
             ;;
-        reinstall)
-            reinstall_all
+        *)
+            log_error "Invalid operation mode."
+            exit 1
             ;;
     esac
 }
