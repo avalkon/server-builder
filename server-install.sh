@@ -24,7 +24,7 @@ ARCH="$(dpkg --print-architecture)"
 
 # Web Addresses
 YOURDOMAIN="yourdomain.com" #for local use, tailscale funnel, and Cloudflare Tunnels, this can be "localhost"
-SUBDOMAIN="yoursubdomain"   #like yoursubdomain.yourdomain.com(Only used if apache will not be serving at www.)
+SUBDOMAIN=""   #like yoursubdomain.yourdomain.com(Only used if apache will not be serving at www.)
 SITENAME="yoursitename"    #This determines apache's .conf and ensite. can be practically anything you want, EXCEPT "000-default"
 YOUREMAIL="youremail@domain.com" #for apache config, not actually necessary, and certainly not sent anywhere.
 
@@ -127,41 +127,241 @@ confirm() {
     esac
 }
 
+select_all_services() {
+    INSTALL_SHARING=true
+    INSTALL_WEB=true
+    INSTALL_SEARXNG=true
+    INSTALL_CALIBRE=true
+    INSTALL_CROSSPOINT=true
+    INSTALL_NAVIDROME=true
+}
+
+prompt_value() {
+    local prompt="$1"
+    local current="$2"
+    local placeholder="${3:-}"
+    local result
+    while true; do
+        read -r -p "${prompt} [${current}]: " result
+        result="${result:-$current}"
+        # Don't allow an unchanged placeholder
+        if [[ -n "$placeholder" && "$result" == "$placeholder" ]]; then
+            log_error "Please enter a value for ${prompt}."
+            continue
+        fi
+        if [[ -z "$result" ]]; then
+            log_error "${prompt} cannot be empty."
+            continue
+        fi
+        printf '%s' "$result"
+        return 0
+    done
+}
+
+prompt_optional_value() {
+    local prompt="$1"
+    local current="$2"
+    local result
+    if [[ -n "$current" ]]; then
+        read -r -p "${prompt} [${current}]: " result
+        printf '%s' "${result:-$current}"
+    else
+        read -r -p "${prompt} [optional]: " result
+        printf '%s' "$result"
+    fi
+}
+
+prompt_path() {
+    local prompt="$1"
+    local current="$2"
+    local placeholder="${3:-}"
+    local result
+    while true; do
+        read -r -p "${prompt} [${current}]: " result
+        result="${result:-$current}"
+        # Don't allow an unchanged placeholder
+        if [[ -n "$placeholder" && "$result" == "$placeholder" ]]; then
+            log_error "Please enter a real path for ${prompt}."
+            continue
+        fi
+        # Require absolute Linux paths
+        if [[ "$result" != /* ]]; then
+            log_error "Path must be absolute and begin with /"
+            continue
+        fi
+        # Remove trailing slash except for /
+        if [[ "$result" != "/" ]]; then
+            result="${result%/}"
+        fi
+        printf '%s' "$result"
+        return 0
+    done
+}
+
+normalize_path() {
+    local path="$1"
+    # Expand leading ~ for the invoking user
+    if [[ "$path" == "~/"* && -n "${CURRENT_USER:-}" ]]; then
+        local user_home
+        user_home="$(getent passwd "$CURRENT_USER" | cut -d: -f6)"
+        path="${user_home}/${path#~/}"
+    fi
+    # Require absolute paths
+    if [[ "$path" != /* ]]; then
+        log_error "Path must be absolute: $path"
+        return 1
+    fi
+    printf '%s\n' "${path%/}"
+}
+
+show_selected_config() {
+    local needs_web=false
+    if [[ "$INSTALL_WEB" == true || "$INSTALL_SEARXNG" == true ]]; then
+        needs_web=true
+    fi
+    echo ""
+    echo "Selected Configuration"
+    echo "============================================================"
+
+    if [[ "$needs_web" == true ]]; then
+        printf "  %-22s %s\n" "Domain:" "$YOURDOMAIN"
+        if [[ -n "$SUBDOMAIN" ]]; then
+            printf "  %-22s %s\n" "Subdomain:" "$SUBDOMAIN"
+        else
+            printf "  %-22s %s\n" "Subdomain:" "(none)"
+        fi
+        printf "  %-22s %s\n" "Site name:" "$SITENAME"
+    fi
+    if [[ "$INSTALL_CALIBRE" == true ]]; then
+        printf "  %-22s %s\n" "Calibre library:" "$CALIBRE_LIBRARY"
+    fi
+    if [[ "$INSTALL_NAVIDROME" == true ]]; then
+        printf "  %-22s %s\n" "Music library:" "$MUSIC_LIBRARY"
+    fi
+    echo "============================================================"
+    echo ""
+}
+
+prompt_config() {
+    local needs_web=false
+    section_header "Installation Configuration"
+    #
+    # Determine which configuration groups are required.
+    #
+    if [[ "$INSTALL_WEB" == true || "$INSTALL_SEARXNG" == true ]]; then
+        needs_web=true
+    fi
+    #
+    # Web configuration
+    #
+    if [[ "$needs_web" == true ]]; then
+        echo "Web configuration"
+        echo "-----------------"
+        YOURDOMAIN="$(
+            prompt_value \
+                "Domain" \
+                "$YOURDOMAIN" \
+                "yourdomain.com"
+        )"
+        SUBDOMAIN="$(
+            prompt_optional_value \
+                "Subdomain" \
+                "$SUBDOMAIN"
+        )"
+        SITENAME="$(
+            prompt_value \
+                "Site name" \
+                "$SITENAME" \
+                "yoursitename"
+        )"
+        echo ""
+    fi
+    #
+    # Calibre configuration
+    #
+    if [[ "$INSTALL_CALIBRE" == true ]]; then
+        echo "Calibre-Web configuration"
+        echo "-------------------------"
+        CALIBRE_LIBRARY="$(
+            prompt_path \
+                "Calibre library path" \
+                "$CALIBRE_LIBRARY" \
+                "/path/to/books/library"
+        )"
+        echo ""
+    fi
+    #
+    # Navidrome configuration
+    #
+    if [[ "$INSTALL_NAVIDROME" == true ]]; then
+        echo "Navidrome configuration"
+        echo "-----------------------"
+        MUSIC_LIBRARY="$(
+            prompt_path \
+                "Music library path" \
+                "$MUSIC_LIBRARY" \
+                "/path/to/music/library"
+        )"
+        echo ""
+    fi
+    show_selected_config
+    if ! confirm "Continue with this configuration?" "y"; then
+        log_warn "Installation cancelled."
+        exit 0
+    fi
+}
+
 validate_config() {
+    local errors=0
+    local needs_web=false
+    if [[ "$INSTALL_WEB" == true || "$INSTALL_SEARXNG" == true ]]; then
+        needs_web=true
+    fi
+    #
+    # Web validation
+    #
+    if [[ "$needs_web" == true ]]; then
+        if [[ -z "$YOURDOMAIN" || "$YOURDOMAIN" == "yourdomain.com" ]]; then
+            log_error "A valid domain must be configured."
+            errors=$((errors + 1))
+        fi
 
-    if [[ "$CALIBRE_LIBRARY" == "/path/to/books/library" ]]; then
-        log_error "Please configure CALIBRE_LIBRARY before installation."
+        if [[ -z "$SITENAME" || "$SITENAME" == "yoursitename" ]]; then
+            log_error "A site name must be configured."
+            errors=$((errors + 1))
+        fi
+    fi
+    #
+    # Calibre validation
+    #
+    if [[ "$INSTALL_CALIBRE" == true ]]; then
+        if [[ -z "$CALIBRE_LIBRARY" ||
+              "$CALIBRE_LIBRARY" == "/path/to/books/library" ]]; then
+            log_error "A Calibre library path must be configured."
+            errors=$((errors + 1))
+        elif [[ "$CALIBRE_LIBRARY" != /* ]]; then
+            log_error "CALIBRE_LIBRARY must be an absolute path."
+            errors=$((errors + 1))
+        fi
+    fi
+    #
+    # Navidrome validation
+    #
+    if [[ "$INSTALL_NAVIDROME" == true ]]; then
+        if [[ -z "$MUSIC_LIBRARY" ||
+              "$MUSIC_LIBRARY" == "/path/to/music/library" ]]; then
+            log_error "A music library path must be configured."
+            errors=$((errors + 1))
+        elif [[ "$MUSIC_LIBRARY" != /* ]]; then
+            log_error "MUSIC_LIBRARY must be an absolute path."
+            errors=$((errors + 1))
+        fi
+    fi
+    if (( errors > 0 )); then
+        log_error "Configuration validation failed with ${errors} error(s)."
         return 1
     fi
-
-    if [[ "$MUSIC_LIBRARY" == "/path/to/music/library" ]]; then
-        log_error "Please configure MUSIC_LIBRARY before installation."
-        return 1
-    fi
-    [[ -n "$CALIBRE_LIBRARY" ]] || {
-        log_error "CALIBRE_LIBRARY is empty."
-        return 1
-    }
-    [[ -n "$MUSIC_LIBRARY" ]] || {
-        log_error "MUSIC_LIBRARY is empty."
-        return 1
-    }
-    [[ "$APACHE_PORT" =~ ^[0-9]+$ ]] || {
-        log_error "APACHE_PORT must be numeric."
-        return 1
-    }
-    [[ "$CALIBRE_PORT" =~ ^[0-9]+$ ]] || {
-        log_error "CALIBRE_PORT must be numeric."
-        return 1
-    }
-    [[ "$CROSSPOINT_PORT" =~ ^[0-9]+$ ]] || {
-        log_error "CROSSPOINT_PORT must be numeric."
-        return 1
-    }
-    [[ "$NAVIDROME_PORT" =~ ^[0-9]+$ ]] || {
-        log_error "NAVIDROME_PORT must be numeric."
-        return 1
-    }
+    log_success "Configuration validated."
 }
 
 section_header() {
@@ -219,8 +419,10 @@ OPTIONS:
     -s, --silent                 Minimal output (default)
 
 EXAMPLES:
-  sudo $0                              # Full installation (minimal output)
-  sudo $0 -v                           # Full installation (verbose)
+  sudo $0                              # Show help
+  sudo $0 -v                           # Show help
+  sudo $0 --install-all                # Full installation
+  sudo $0 -v --install-all             # Full installation (verbose)
   sudo $0 -v --install-sync            # Install CrossPoint Sync verbosely
   sudo $0 --uninstall-navidrome        # Remove Navidrome only
   sudo $0 --uninstall-all              # Remove everything
@@ -545,11 +747,17 @@ step_web_server() {
     fi
     
     log_info "Configuring VirtualHost..."
+
+    local server_alias=""
+    if [[ -n "$SUBDOMAIN" ]]; then
+        server_alias="    ServerAlias ${SUBDOMAIN}.${YOURDOMAIN}"
+    fi
+    
     cat > /etc/apache2/sites-available/${SITENAME}.conf << VHOST
 <VirtualHost *:${APACHE_PORT}>
     ServerAdmin ${YOUREMAIL}
     ServerName ${YOURDOMAIN}
-    ServerAlias ${SUBDOMAIN}.${YOURDOMAIN}
+${server_alias}
     DocumentRoot /var/www/http
     ErrorLog \${APACHE_LOG_DIR}/error.log
     CustomLog \${APACHE_LOG_DIR}/access.log combined
@@ -1280,12 +1488,7 @@ parse_args() {
                 # Set specific flags
                 case "$1" in
                     --install-all)
-                        INSTALL_SHARING=true
-                        INSTALL_WEB=true
-                        INSTALL_SEARXNG=true
-                        INSTALL_CALIBRE=true
-                        INSTALL_CROSSPOINT=true
-                        INSTALL_NAVIDROME=true
+                        select_all_services
                         ;;
                     --install-sharing)
                         INSTALL_SHARING=true
@@ -1313,7 +1516,6 @@ parse_args() {
                     log_error "Cannot combine --reinstall with install or uninstall options."
                     exit 1
                 fi
-
                 OPERATION_MODE="reinstall"
                 REINSTALL_MODE=true
                 shift
@@ -1424,16 +1626,6 @@ execute_install() {
     FAILED_SERVICES=()
     log_info "Execution Mode: INSTALL"
     
-    if [[ "${INSTALL_MODE}" == false ]]; then
-        # No specific flags, run full install
-        INSTALL_SHARING=true
-        INSTALL_WEB=true
-        INSTALL_SEARXNG=true
-        INSTALL_CALIBRE=true
-        INSTALL_CROSSPOINT=true
-        INSTALL_NAVIDROME=true
-    fi
-    
     step_system_prep
     
     if [[ "${INSTALL_SHARING}" == true ]]; then
@@ -1519,25 +1711,37 @@ execute_uninstall() {
 main() {
     check_root
     parse_args "$@"
-    if [[ -z "$OPERATION_MODE" ]]; then
+    #
+    # An explicit operation is required.
+    #
+    if [[ -z "${OPERATION_MODE:-}" ]]; then
         usage
         exit 0
     fi
-
     case "$OPERATION_MODE" in
         install)
+            prompt_config
             validate_config
             execute_install
             ;;
         reinstall)
+            select_all_services
+            prompt_config
             validate_config
+            log_warn "Reinstall mode will attempt to repair all services."
+
+            if ! confirm "Continue with full reinstall?" "n"; then
+                log_info "Reinstall cancelled."
+                exit 0
+            fi
             reinstall_all
             ;;
         uninstall)
             execute_uninstall
             ;;
         *)
-            log_error "Invalid operation mode."
+            log_error "Invalid operation mode: $OPERATION_MODE"
+            usage
             exit 1
             ;;
     esac
