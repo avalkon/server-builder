@@ -32,6 +32,8 @@ YOUREMAIL="youremail@domain.com" #for apache config, not actually necessary, and
 # Library Paths
 # This is where your calibre books/ebooks are/will be stored
 CALIBRE_LIBRARY="/path/to/books/library"
+# This is where auto ingest looks for books. Reccomend using the default.
+INGEST_DIR="srv/calibre-ingest"
 
 # Music Path
 MUSIC_LIBRARY="/path/to/music/library"
@@ -499,8 +501,7 @@ SMBCONF
     fi
     
     log_warn "Post-installation: Add users to Samba with 'sudo smbpasswd -a <username>'"
-    log_info "Access: smb://$(hostname)/shared or \\\\$(hostname)\\shared"
-    
+    log_info "Access: smb://$(hostname)/shared or \\\\$(hostname)\\shared" 
 }
 
 step_web_server() {
@@ -575,7 +576,6 @@ VHOST
     cmd_exec systemctl status apache2 --no-pager | head -5
 
     verify_service_status "apache2" "Apache" || true
-    
 }
 
 step_searxng() {
@@ -652,21 +652,34 @@ step_calibre() {
     
     log_info "Creating library path: $CALIBRE_LIBRARY"
     cmd_exec mkdir -p "$CALIBRE_LIBRARY"
-    cmd_exec chmod 755 "$CALIBRE_LIBRARY"
+    cmd_exec chmod 775 "$CALIBRE_LIBRARY"
     
-    log_info "Installing Calibre (required by Calibre-Web NextGen)..."
-    cmd_exec apt-get install -y calibre
+
     
     log_info "Installing Calibre-Web dependencies..."
     cmd_exec apt-get install -y \
-        python3 \
-        python3-pip \
-        python3-venv \
-        git \
+        python3-dev \
         sqlite3 \
-        curl \
         zip \
-        imagemagick
+        xz-utils \
+        xdg-utils \
+        ca-certificates \
+        libegl1 \
+        libopengl0
+
+    log_info "Installing Calibre (required by Calibre-Web NextGen)..."
+    # Remove distro Calibre if it was installed previously
+    if dpkg-query -W -f='${Status}' calibre 2>/dev/null | grep -q "install ok installed"; then
+        sudo apt-get remove -y calibre
+    fi
+
+    # Install/upgrade current official Calibre binary release
+    wget -nv -O /tmp/calibre-linux-installer.sh \
+        https://download.calibre-ebook.com/linux-installer.sh
+
+    sh /tmp/calibre-linux-installer.sh install_dir=/opt
+
+    rm -f /tmp/calibre-linux-installer.sh
 
     log_info "Opening firewall port..."
     cmd_exec ufw allow "${CALIBRE_PORT}/tcp"   # Calibre-Web
@@ -679,7 +692,7 @@ step_calibre() {
     if [[ -d .git ]]; then
         log_info "Repository already exists, skipping clone."
     else
-        cmd_exec git clone https://github.com/new-usemame/Calibre-Web-NextGen.git .
+        cmd_exec git clone https://github.com/avalkon/Calibre-Web-NextGen--no-docker.git .
     fi
     
     log_info "Creating service user '$CALIBRE_USER'..."
@@ -707,11 +720,32 @@ step_calibre() {
     "$INSTALL_DIR/venv/bin/python3" -m pip install --upgrade pip setuptools wheel
     "$INSTALL_DIR/venv/bin/python3" -m pip install -e .
     
-    log_info "Creating config directory..."
+    log_info "Creating config and ingest directories..."
     cmd_exec mkdir -p "$CONFIG_DIR"
     cmd_exec chmod 775 "$CONFIG_DIR"
+    cmd_exec mkdir -p "$INGEST_DIR"
+    cmd_exec mkdir -p "${INGEST_DIR}/processed"
+    cmd_exec mkdir -p "${INGEST_DIR}/failed"
+    cmd_exec mkdir -p "${INGEST_DIR}/config"
+    cmd_exec chmod 775 -R "$INGEST_DIR"
+
+    cat > ${INSTALL_DIR}/dirs.json << EOF
+{
+    "ingest_folder": "${INGEST_DIR}",
+    "calibre_library_dir": "${CALIBRE_LIBRARY}",
+    "tmp_conversion_dir": "${INGEST_DIR}/config/.cwa_conversion_tmp",
+    "processed_folder": "${INGEST_DIR}/processed",
+    "failed_folder": "${INGEST_DIR}/failed",
+    "retry_queue_file": "${INGEST_DIR}/config/retry_queue.json",
+    "max_retry_attempts": 3,
+    "retry_interval_seconds": 300,
+    "checkpoint_file": "${INSTALL_DIR}/.meta_checkpoint",
+    "status_file": "${CONFIG_DIR}/cwa_ingest_status",
+    "meta_status_file": "{CONFIG_DIR}/cwa_meta_status"
+}
+EOF
     
-    log_info "Creating systemd service..."
+    log_info "Creating systemd services..."
     cat > /etc/systemd/system/calibre-web-nextgen.service << SERVICE
 [Unit]
 Description=Calibre-Web NextGen
@@ -728,11 +762,61 @@ ExecStart=${INSTALL_DIR}/venv/bin/python cps.py -p ${CONFIG_DIR}/app.db
 Restart=always
 RestartSec=10
 UMask=022
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 SERVICE
-    
+
+    cat > /etc/systemd/system/calibre-web-ingest.service << SERVICE
+[Unit]
+Description=Calibre-Web NextGen Ingest Service
+After=calibre-web-nextgen.service
+Requires=calibre-web-nextgen.service
+
+[Service]
+Type=simple
+User=${CALIBRE_USER}
+Group=${CALIBRE_GROUP}
+WorkingDirectory=${INSTALL_DIR}
+Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
+
+ExecStart=${INSTALL_DIR}/venv/bin/python ${INSTALL_DIR}/cps/auto-ingest.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+    cat > /etc/systemd/system/calibre-web-meta.service << SERVICE
+[Unit]
+Description=Calibre-Web NextGen Metadata Change Detector
+After=calibre-web-nextgen.service
+Requires=calibre-web-nextgen.service
+
+[Service]
+Type=simple
+User=${CALIBRE_USER}
+Group=${CALIBRE_GROUP}
+WorkingDirectory=${INSTALL_DIR}
+Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
+Environment="CWA_APP_DB_PATH=${INSTALL_DIR}/config/app.db"
+Environment="CWA_METADATA_CHANGE_LOGS_DIR=${INSTALL_DIR}/config/metadata_change_logs"
+Environment="CWA_METADATA_TEMP_DIR=${INSTALL_DIR}/config/metadata_temp"
+ExecStart=/bin/bash ${INSTALL_DIR}/scripts/metadata-detector.sh
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
     log_info "Setting permissions..."
     cmd_exec chown -R "${CALIBRE_USER}:${CALIBRE_GROUP}" "$INSTALL_DIR"
     cmd_exec chmod -R u=rwX,g=rX,o=rX "$INSTALL_DIR"
@@ -765,9 +849,15 @@ SQLEOF
     
     log_info "Enabling and starting service..."
     cmd_exec systemctl enable calibre-web-nextgen
+    cmd_exec systemctl enable calibre-web-ingest
+    cmd_exec systemctl enable calibre-web-meta
     cmd_exec systemctl start calibre-web-nextgen
+    cmd_exec systemctl start calibre-web-ingest
+    cmd_exec systemctl start calibre-web-meta
     
     verify_service_status "calibre-web-nextgen" "Calibre-Web NextGen" || true
+    verify_service_status "calibre-web-ingest" "Calibre-Web Ingest" || true
+    verify_service_status "calibre-web-meta" "Calibre-Web Meta" || true
     
     log_info "Default credentials: admin / admin123"
     log_info "Remember to change the password after first login!"
@@ -830,7 +920,6 @@ step_crosspoint() {
         cmd_exec chown "$CROSSPOINT_USER:$CROSSPOINT_GROUP" "$APP_DIR/token.key"
         cmd_exec chmod 600 "$APP_DIR/token.key"
     fi
-
 
     log_info "Creating environment file..."
     if [[ ! -f "$APP_DIR/env" ]]; then
@@ -1010,7 +1099,8 @@ uninstall_calibre() {
     
     log_success "Calibre-Web removed successfully"
     log_warn "Note: Your calibre library at $CALIBRE_LIBRARY is preserved"
-    log_warn "Note: Calibre package (apt) is preserved - uninstall manually if desired"
+    log_warn "Note: Your ingest folder is preserved at $INGEST_DIR"
+    log_warn "Note: Calibre package is preserved - uninstall manually if desired"
 }
 
 uninstall_crosspoint() {
@@ -1265,7 +1355,6 @@ parse_args() {
     done
 }
 
-
 reinstall_all() {
     SERVICES_CHECKED=()
     FAILED_SERVICES=()
@@ -1324,7 +1413,6 @@ reinstall_all() {
 
     log_success "✓ Reinstall completed successfully."
 }
-
 
 execute_install() {
     SERVICES_CHECKED=()
