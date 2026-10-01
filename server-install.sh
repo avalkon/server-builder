@@ -1343,7 +1343,11 @@ step_navidrome() {
     
     log_info "Creating music library directory..."
     cmd_exec mkdir -p "$MUSIC_LIBRARY"
-    cmd_exec chmod 755 "$MUSIC_LIBRARY"
+    if [[ -n "${CURRENT_USER}" ]]; then
+        cmd_exec chown ${CURRENT_USER}:users "$MUSIC_LIBRARY"
+    else
+        log_warn "No non-root invoking user detected; skipping users group assignment."
+    cmd_exec chmod 775 "$MUSIC_LIBRARY"
 
     cmd_exec usermod -aG users navidrome
     
@@ -1362,6 +1366,8 @@ CONFIG
     cmd_exec systemctl start navidrome
     
     verify_service_status "navidrome" "Navidrome" || true
+    if [[ -n "${CURRENT_USER}" ]]; then
+        log_warn "You need to give user "navidrome" permissions to access the music library"
 }
 
 #-------------------------------------------------------------------------------
