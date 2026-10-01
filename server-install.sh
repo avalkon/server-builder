@@ -705,6 +705,80 @@ SMBCONF
     log_info "Access: smb://$(hostname)/shared or \\\\$(hostname)\\shared" 
 }
 
+#Helper for sharing Calibre ingest folder
+add_calibre_ingest_samba_share() {
+    local share_name="calibre-ingest"
+    local smb_conf="/etc/samba/smb.conf"
+
+    echo ""
+    if ! confirm "Share the Calibre ingest folder over Samba?" "n"; then
+        log_info "Skipping Samba share for Calibre ingest folder."
+        return 0
+    fi
+
+    # Samba must already be installed
+    if ! command -v smbd >/dev/null 2>&1 || [[ ! -f "$smb_conf" ]]; then
+        log_warn "Samba is not installed/configured."
+        log_warn "Skipping Calibre ingest Samba share."
+        return 0
+    fi
+
+    # Make sure the ingest directory exists
+    cmd_exec mkdir -p "$INGEST_DIR"
+
+    # Make sure the users group exists
+    if ! getent group users >/dev/null; then
+        log_info "Creating 'users' group..."
+        cmd_exec groupadd users
+    fi
+
+    # Avoid adding the share more than once
+    if grep -qE "^[[:space:]]*\[${share_name}\][[:space:]]*$" "$smb_conf"; then
+        log_info "Samba share [${share_name}] already exists; leaving it unchanged."
+        return 0
+    fi
+
+    log_info "Adding Calibre ingest share to Samba..."
+
+    # Back up smb.conf before changing it
+    cmd_exec cp "$smb_conf" \
+        "${smb_conf}.backup.$(date +%Y%m%d%H%M%S)"
+
+    cat >> "$smb_conf" << SMBCONF
+
+[${share_name}]
+    path = ${INGEST_DIR}
+    browseable = yes
+    read only = no
+    guest ok = no
+    valid users = @users
+    force group = users
+    create mask = 0660
+    directory mask = 2770
+SMBCONF
+
+    log_info "Modifying permissions..."
+    
+    cmd_exec usermod -aG users "$CALIBRE_USER"
+    cmd_exec chgrp users "$INGEST_DIR"
+    cmd_exec chmod 2770 "$INGEST_DIR"
+
+    log_info "Testing Samba configuration..."
+
+    if ! testparm -s >/dev/null; then
+        log_error "Samba configuration test failed."
+        log_error "Please inspect ${smb_conf} before restarting Samba."
+        return 1
+    fi
+
+    log_info "Restarting Samba..."
+    cmd_exec systemctl restart smbd
+
+    log_success "Calibre ingest folder shared as [${share_name}]"
+    log_info "Share path: ${INGEST_DIR}"
+    log_info "Network share: \\\\$(hostname)\\${share_name}"
+}
+
 step_web_server() {
     section_header "Web Server Setup (Apache + PHP)"
     
@@ -998,6 +1072,9 @@ step_calibre() {
     "meta_status_file": "${CONFIG_DIR}/cwa_meta_status"
 }
 EOF
+
+    log_info "Configuring optional Samba share for Calibre ingest..."
+    add_calibre_ingest_samba_share
     
     log_info "Creating systemd services..."
     cat > /etc/systemd/system/calibre-web-nextgen.service << SERVICE
