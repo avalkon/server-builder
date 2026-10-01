@@ -986,6 +986,7 @@ step_calibre() {
     cmd_exec mkdir -p "$CALIBRE_LIBRARY"
     cmd_exec chmod 775 "$CALIBRE_LIBRARY"
     
+    
 
     
     log_info "Installing Calibre-Web dependencies..."
@@ -1044,6 +1045,7 @@ step_calibre() {
 
     if [[ -n "${CURRENT_USER}" ]]; then
         cmd_exec usermod -a -G "$CALIBRE_GROUP" "$CURRENT_USER" 2>/dev/null || true
+        cmd_exec usermod -a -G "$CURRENT_USER" "$CALIBRE_USER" 2>/dev/null || true
     else
         log_warn "No non-root invoking user detected; skipping users group assignment."
     fi
