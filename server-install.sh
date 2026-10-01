@@ -873,13 +873,16 @@ log_success "Linux Mint platform compatibility applied."
     cmd_exec mkdir -p "/usr/local/searxng"
     cmd_exec chown -R searxng:searxng "/usr/local/searxng"
     cmd_exec chown -R searxng /opt/searxng
+    cmd_exec chmod 777 -r "/usr/local/searxng"
     cmd_exec git config --global --add safe.directory /opt/searxng
     
     log_info "Installing SearxNG components..."
     cmd_exec utils/searxng.sh install all
+    cmd_exec chmod 777 -r "/usr/local/searxng"
     cmd_exec utils/searxng.sh install uwsgi
+    cmd_exec chmod 777 -r "/usr/local/searxng"
     cmd_exec utils/searxng.sh install apache
-
+    cmd_exec chmod 755 -r "/usr/local/searxng"
     cmd_exec a2enmod proxy_uwsgi
     
     log_info "Enabling SearxNG site..."
