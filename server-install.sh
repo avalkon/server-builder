@@ -1344,6 +1344,8 @@ step_navidrome() {
     log_info "Creating music library directory..."
     cmd_exec mkdir -p "$MUSIC_LIBRARY"
     cmd_exec chmod 755 "$MUSIC_LIBRARY"
+
+    cmd_exec usermod -aG users navidrome
     
     log_info "Configuring Navidrome..."
     cmd_exec mkdir -p /etc/navidrome
