@@ -918,7 +918,8 @@ step_calibre() {
         xdg-utils \
         ca-certificates \
         libegl1 \
-        libopengl0
+        libopengl0 \
+        libxcb-cursor0
 
     log_info "Installing Calibre (required by Calibre-Web NextGen)..."
     # Remove distro Calibre if it was installed previously
