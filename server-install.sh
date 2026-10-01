@@ -947,14 +947,17 @@ log_success "Linux Mint platform compatibility applied."
     cmd_exec mkdir -p "/usr/local/searxng"
     cmd_exec chown -R searxng:searxng "/usr/local/searxng"
     cmd_exec chown -R searxng /opt/searxng
+    cmd_exec chmod -R 777 "/opt/searxng"
     cmd_exec chmod -R 777 "/usr/local/searxng"
     cmd_exec git config --global --add safe.directory /opt/searxng
     
     log_info "Installing SearxNG components..."
     cmd_exec utils/searxng.sh install all
     cmd_exec chmod -R 777 "/usr/local/searxng"
+    cmd_exec chmod -R 777 "/opt/searxng"
     cmd_exec utils/searxng.sh install uwsgi
     cmd_exec chmod -R 777 "/usr/local/searxng"
+    cmd_exec chmod -R 777 "/opt/searxng"
     cmd_exec utils/searxng.sh install apache
     cmd_exec chmod -R 777 "/usr/local/searxng"
     cmd_exec a2enmod proxy_uwsgi
@@ -965,6 +968,8 @@ log_success "Linux Mint platform compatibility applied."
     log_info "Restarting Apache and uWSGI..."
     cmd_exec systemctl restart apache2
     cmd_exec systemctl restart uwsgi
+    cmd_exec chmod -R 755 "/opt/searxng"
+    cmd_exec chmod -R 755 "/usr/local/searxng"
     
     verify_searxng_status || true
 }
