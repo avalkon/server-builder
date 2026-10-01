@@ -1,6 +1,7 @@
 # server-builder
 
-Script to fully set up a Mint or Ubuntu server with apache, samba, tailscale, searxng, calibre-web-nextgen, crosspoint-sync, and navidrome.
+Script to fully set up a Mint or Ubuntu server with apache, samba, tailscale, searxng, calibre-web-nextgen, crosspoint-sync, and navidrome. 
+Nemo is in the script, but commented out, uncomment it if you would like it. Nemo is not necessary for file sharing.
 Does not invoke Docker, ever. Fully bare-metal Mint/Ubuntu.
 
 # How to use
@@ -18,7 +19,7 @@ To use, simply download, set as executable(chmod +x ./server-install.sh), and ex
 
   Selective Installation:
   
-    --install-sharing            Install file sharing (Samba, Tailscale, Nemo)
+    --install-sharing            Install file sharing (Samba, Tailscale, (Nemo if uncommented))
     
     --install-web                Install web server (Apache + PHP)
     
