@@ -624,8 +624,8 @@ step_system_prep() {
 step_file_sharing() {
     section_header "File Sharing & Remote Access"
     
-    log_info "Installing Nemo file manager..."
-    cmd_exec apt-get install -y nemo nemo-share
+#    log_info "Installing Nemo file manager..."
+#    cmd_exec apt-get install -y nemo nemo-share
 
     log_info "Opening firewall port..."
     cmd_exec ufw allow 445/tcp    # Samba
