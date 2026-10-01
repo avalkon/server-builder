@@ -960,6 +960,7 @@ log_success "Linux Mint platform compatibility applied."
     cmd_exec chmod -R 777 "/opt/searxng"
     cmd_exec utils/searxng.sh install apache
     cmd_exec chmod -R 777 "/usr/local/searxng"
+    cmd_exec chmod -R 777 "/opt/searxng"
     cmd_exec a2enmod proxy_uwsgi
     
     log_info "Enabling SearxNG site..."
@@ -985,9 +986,6 @@ step_calibre() {
     log_info "Creating library path: $CALIBRE_LIBRARY"
     cmd_exec mkdir -p "$CALIBRE_LIBRARY"
     cmd_exec chmod 775 "$CALIBRE_LIBRARY"
-    
-    
-
     
     log_info "Installing Calibre-Web dependencies..."
     cmd_exec apt-get install -y \
@@ -1041,6 +1039,7 @@ step_calibre() {
             --shell /usr/sbin/nologin \
             --home-dir "$INSTALL_DIR" \
             "$CALIBRE_USER"
+        cmd_exec usermod -a -G "users" "$CALIBRE_USER" 2>/dev/null || true
     fi
 
     if [[ -n "${CURRENT_USER}" ]]; then
@@ -1348,10 +1347,7 @@ step_navidrome() {
     
     log_info "Configuring Navidrome..."
     cmd_exec mkdir -p /etc/navidrome
-    if [[ -f /etc/navidrome/navidrome.toml ]]; then
-        log_info "Existing Navidrome configuration found; preserving it."
-    else
-        cat > /etc/navidrome/navidrome.toml << CONFIG
+    cat > /etc/navidrome/navidrome.toml << CONFIG
 MusicFolder = "${MUSIC_LIBRARY}"
 Port = ${NAVIDROME_PORT}
 DataDir = "/var/lib/navidrome"
